@@ -1,0 +1,19 @@
+# convnext tiny backbone, PAN neck and TOOD head
+
+common:
+
+model:
+  backbone:
+    type: TimmBackbone
+    args:
+      name: convnext_tiny.fb_in1k    # timm model name with the weight tag, apache-2.0 weights
+      out_indices: [1, 2, 3]         # strides 8, 16, 32
+      pretrained: true
+  neck:
+    type: PAN
+  head:
+    type: TOODHead
+
+train:
+
+predict:
