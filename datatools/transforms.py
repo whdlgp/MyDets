@@ -349,11 +349,11 @@ class Compose:
         return output
 
 
-def create_transform(mode: Literal["train", "val", "predict"], image_size: tuple[int, int], mean: tuple[float, float, float], std: tuple[float, float, float]) -> Compose:
+def create_transform(mode: Literal["train", "train_no_mosaic", "val", "predict"], image_size: tuple[int, int], mean: tuple[float, float, float], std: tuple[float, float, float]) -> Compose:
     """Create the transform of a mode, used as the collate function.
 
     Args:
-        mode: train with augmentation, val with letterbox, or predict with resize for batches of one image.
+        mode: train with augmentation, train_no_mosaic without the mosaic, val with letterbox, or predict with resize for batches of one image.
         image_size: (width, height) of the output images, multiples of the model strides.
         mean: mean of each RGB channel, for pixel values in [0, 1].
         std: standard deviation of each RGB channel, for pixel values in [0, 1].
@@ -363,6 +363,7 @@ def create_transform(mode: Literal["train", "val", "predict"], image_size: tuple
     """
     blocks = {
         "train": [RandomScale(), RandomCrop(), RandomFlip(), RandomHSV(), Mosaic()],
+        "train_no_mosaic": [RandomScale(), RandomCrop(), RandomFlip(), RandomHSV()],
         "val": [Letterbox()],
         "predict": [Resize()]
     }
