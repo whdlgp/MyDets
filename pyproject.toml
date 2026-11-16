@@ -1,0 +1,21 @@
+[project]
+name = "mydets"
+version = "0.1.0"
+requires-python = "==3.12.*"
+dependencies = [
+    "torch",
+    "torchvision",
+    "timm",
+]
+
+[tool.uv]
+package = false
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu132" }
+torchvision = { index = "pytorch-cu132" }
+
+[[tool.uv.index]]
+name = "pytorch-cu132"
+url = "https://download.pytorch.org/whl/cu132"
+explicit = true
