@@ -17,3 +17,6 @@ uv.lock
 .mypy_cache/
 .ruff_cache/
 .ipynb_checkpoints/
+
+# Datasets
+data/
