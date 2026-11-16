@@ -239,7 +239,9 @@ class RetinaNetHead(Head):
 
         # the normalizer is an EMA of the positives, starting from 100 with momentum 0.9
         momentum = 0.9
-        self.loss_normalizer = self.loss_normalizer * momentum + max(num_pos, 1) * (1 - momentum)
+
+        if self.training:
+            self.loss_normalizer = self.loss_normalizer * momentum + max(num_pos, 1) * (1 - momentum)
 
         cls_targets = F.one_hot(gt_labels[valid_mask], self.num_classes + 1)[:, :-1].to(cls_logits.dtype)
         loss_cls = sigmoid_focal_loss(cls_logits[valid_mask], cls_targets, self.focal_alpha, self.focal_gamma, "sum")
