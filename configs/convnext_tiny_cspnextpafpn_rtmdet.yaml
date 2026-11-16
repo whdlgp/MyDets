@@ -1,12 +1,14 @@
 # convnext tiny backbone, CSPNeXtPAFPN neck and RTMDet head
 
 common:
+  mean: [0.485, 0.456, 0.406]    # imagenet
+  std: [0.229, 0.224, 0.225]
 
 model:
   backbone:
     type: TimmBackbone
     args:
-      name: convnext_tiny.fb_in1k    # timm model name with the weight tag, apache-2.0 weights
+      name: convnext_tiny.fb_in1k    # timm model name with the weight tag
       out_indices: [1, 2, 3]         # strides 8, 16, 32
       pretrained: true
   neck:
