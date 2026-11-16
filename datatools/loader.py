@@ -3,7 +3,8 @@ from pathlib import Path
 
 import cv2
 import numpy as np
-from torch.utils.data import DataLoader, Dataset
+from torch import distributed as dist
+from torch.utils.data import DataLoader, Dataset, DistributedSampler
 
 IMAGE_SUFFIXES = {".bmp", ".jpeg", ".jpg", ".png"}
 
@@ -63,6 +64,8 @@ def init_worker(worker_id: int) -> None:
 def create_loader(split_dir: Path, transform: Callable, batch_size: int, shuffle: bool, num_workers: int) -> DataLoader:
     """Create a data loader that runs the transform on each batch in the workers.
 
+    In distributed training, the images are split over the processes.
+
     Args:
         split_dir: split directory with images, labels and optional ignores, next to names.txt.
         transform: transform from a list of dataset samples to the model input and the targets.
@@ -73,4 +76,12 @@ def create_loader(split_dir: Path, transform: Callable, batch_size: int, shuffle
     Returns:
         Data loader of (images, targets).
     """
-    return DataLoader(DetectionDataset(split_dir), batch_size, shuffle=shuffle, num_workers=num_workers, collate_fn=transform, worker_init_fn=init_worker)
+    dataset = DetectionDataset(split_dir)
+    sampler = None
+
+    # evaluation needs every image exactly once, which the padding of DistributedSampler breaks
+    if dist.is_available() and dist.is_initialized():
+        sampler = DistributedSampler(dataset) if shuffle else range(dist.get_rank(), len(dataset), dist.get_world_size())
+        shuffle = False
+
+    return DataLoader(dataset, batch_size, shuffle=shuffle, sampler=sampler, num_workers=num_workers, collate_fn=transform, worker_init_fn=init_worker)
