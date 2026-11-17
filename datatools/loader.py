@@ -3,6 +3,7 @@ from pathlib import Path
 
 import cv2
 import numpy as np
+import torch
 from torch import distributed as dist
 from torch.utils.data import DataLoader, Dataset, DistributedSampler
 
@@ -84,4 +85,8 @@ def create_loader(split_dir: Path, transform: Callable, batch_size: int, shuffle
         sampler = DistributedSampler(dataset) if shuffle else range(dist.get_rank(), len(dataset), dist.get_world_size())
         shuffle = False
 
-    return DataLoader(dataset, batch_size, shuffle=shuffle, sampler=sampler, num_workers=num_workers, collate_fn=transform, worker_init_fn=init_worker)
+    # the workers stay alive over the epochs
+    pin_memory = torch.cuda.is_available()
+    persistent_workers = num_workers > 0
+    return DataLoader(dataset, batch_size, shuffle=shuffle, sampler=sampler, num_workers=num_workers, collate_fn=transform,
+                      worker_init_fn=init_worker, pin_memory=pin_memory, persistent_workers=persistent_workers)
