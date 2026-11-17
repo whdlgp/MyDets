@@ -1,7 +1,8 @@
 # convnext tiny backbone, PAN neck and TOOD head
 
 common:
-  mean: [0.485, 0.456, 0.406]    # imagenet
+  image_size: [640, 640]           # width, height
+  mean: [0.485, 0.456, 0.406]      # imagenet
   std: [0.229, 0.224, 0.225]
 
 model:
@@ -17,5 +18,17 @@ model:
     type: TOODHead
 
 train:
+  dataset_dir: data/voc
+  batch_size: 16
+  num_workers: 4
+  epochs: 100
+  warmup_epochs: 3
+  freeze_epochs: 0
+  close_mosaic_epochs: 15
+  lr: 0.001
+  weight_decay: 0.05
+  ema: true
+  amp: true
+  seed: 0
 
 predict:
