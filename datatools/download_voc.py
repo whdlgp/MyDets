@@ -56,7 +56,10 @@ def download_file(url: str, path: Path) -> None:
     """
     done = path.stat().st_size if path.exists() else 0
 
-    with urlopen(Request(url, headers={"Range": f"bytes={done}-"}), timeout=60) as response:
+    # some servers refuse the default user agent of urllib
+    headers = {"Range": f"bytes={done}-", "User-Agent": "Mozilla/5.0"}
+
+    with urlopen(Request(url, headers=headers), timeout=60) as response:
         # a server without range requests sends the whole file
         if response.status != 206:
             done = 0
@@ -95,11 +98,16 @@ def download_archive(name: str, md5: str, year: str, download_dir: Path) -> Path
             try:
                 download_file(url, path)
             except (URLError, OSError) as error:
+                print(f"{url} failed ({error}), attempt {attempt}/{CONFIG['attempts']}")
+
                 # the requested range is past a complete but corrupted file
                 if isinstance(error, HTTPError) and error.code == 416:
                     path.unlink()
 
-                print(f"{url} failed ({error}), attempt {attempt}/{CONFIG['attempts']}")
+                # a refused or missing file does not change on retry, so the next url is tried
+                elif isinstance(error, HTTPError) and 400 <= error.code < 500 and error.code != 429:
+                    break
+
                 time.sleep(CONFIG["retry_seconds"])
                 continue
 
