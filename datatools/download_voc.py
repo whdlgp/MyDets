@@ -1,18 +1,26 @@
 from pathlib import Path
 from typing import NoReturn
+from urllib.error import HTTPError, URLError
+from urllib.request import Request, urlopen
 import shutil
 import sys
+import time
 import xml.etree.ElementTree as ET
 
-from torchvision.datasets.utils import download_and_extract_archive
+from torchvision.datasets.utils import check_integrity, extract_archive
+from tqdm import tqdm
 
 CONFIG = {
     "out_dir": "data/voc",
     "archives": [
-        ("https://thor.robots.ox.ac.uk/pascal/VOC/voc2007/VOCtrainval_06-Nov-2007.tar", "c52e279531787c972589f7e41ab4ae64"),
-        ("https://thor.robots.ox.ac.uk/pascal/VOC/voc2007/VOCtest_06-Nov-2007.tar", "b6e924de25625d8de591ea690078ad9f"),
-        ("https://thor.robots.ox.ac.uk/pascal/VOC/voc2012/VOCtrainval_11-May-2012.tar", "6cd6e144f989b92b3379bac3b3de84fd")
+        ("VOCtrainval_06-Nov-2007.tar", "c52e279531787c972589f7e41ab4ae64", "voc2007"),
+        ("VOCtest_06-Nov-2007.tar", "b6e924de25625d8de591ea690078ad9f", "voc2007"),
+        ("VOCtrainval_11-May-2012.tar", "6cd6e144f989b92b3379bac3b3de84fd", "voc2012")
     ],
+    "mirror_url": "https://data.pjreddie.com/files/{name}",
+    "official_url": "https://thor.robots.ox.ac.uk/pascal/VOC/{year}/{name}",
+    "attempts": 5,
+    "retry_seconds": 10,
     "splits": {
         "train": [("VOC2007", "trainval"), ("VOC2012", "trainval")],
         "val": [("VOC2007", "test")]
@@ -37,6 +45,72 @@ def exit_with_usage() -> NoReturn:
         "   └─ ignores    (difficult objects)"
     ]
     raise SystemExit("\n".join(lines))
+
+
+def download_file(url: str, path: Path) -> None:
+    """Download a file, continuing after the bytes already in path.
+
+    Args:
+        url: file url.
+        path: file to write.
+    """
+    done = path.stat().st_size if path.exists() else 0
+
+    with urlopen(Request(url, headers={"Range": f"bytes={done}-"}), timeout=60) as response:
+        # a server without range requests sends the whole file
+        if response.status != 206:
+            done = 0
+
+        total = done + int(response.headers.get("Content-Length", 0))
+
+        with open(path, "ab" if done else "wb") as f, tqdm(total=total, initial=done, unit="B", unit_scale=True, desc=path.name) as progress:
+            while chunk := response.read(1 << 20):
+                f.write(chunk)
+                progress.update(len(chunk))
+
+    # a closed connection ends the read early, and the next attempt continues
+    if path.stat().st_size < total:
+        raise ConnectionError(f"connection closed at {path.stat().st_size} of {total} bytes")
+
+
+def download_archive(name: str, md5: str, year: str, download_dir: Path) -> Path:
+    """Download an archive from the mirror, or from the official site when the mirror fails.
+
+    Args:
+        name: archive file name.
+        md5: checksum of the archive.
+        year: folder of the archive on the official site.
+        download_dir: directory to save the archive.
+
+    Returns:
+        Archive with the right checksum.
+    """
+    path = download_dir / name
+
+    if check_integrity(str(path), md5):
+        return path
+
+    for url in [CONFIG["mirror_url"].format(name=name), CONFIG["official_url"].format(year=year, name=name)]:
+        for attempt in range(1, CONFIG["attempts"] + 1):
+            try:
+                download_file(url, path)
+            except (URLError, OSError) as error:
+                # the requested range is past a complete but corrupted file
+                if isinstance(error, HTTPError) and error.code == 416:
+                    path.unlink()
+
+                print(f"{url} failed ({error}), attempt {attempt}/{CONFIG['attempts']}")
+                time.sleep(CONFIG["retry_seconds"])
+                continue
+
+            if check_integrity(str(path), md5):
+                return path
+
+            # a corrupted file starts over
+            print(f"{name} has a wrong checksum, attempt {attempt}/{CONFIG['attempts']}")
+            path.unlink()
+
+    raise SystemExit(f"cannot download {name}")
 
 
 def convert_annotation(xml_path: Path) -> tuple[list[str], list[str]]:
@@ -70,7 +144,8 @@ def main():
     """Download PASCAL VOC and save it as a dataset directory.
 
     Train is VOC2007 and VOC2012 trainval with the difficult objects, and val is VOC2007 test with the difficult objects in ignores.
-    The archives are kept in out_dir/downloads.
+    The archives come from the mirror of pjreddie, or from the official site when the mirror fails, and are kept in out_dir/downloads.
+    Interrupted downloads continue from where they stopped.
 
     Usage: uv run datatools\\download_voc.py [out_dir]
     """
@@ -82,8 +157,10 @@ def main():
     download_dir = out_dir / "downloads"
 
     # download and extract
-    for url, md5 in CONFIG["archives"]:
-        download_and_extract_archive(url, str(download_dir), md5=md5)
+    download_dir.mkdir(parents=True, exist_ok=True)
+
+    for name, md5, year in CONFIG["archives"]:
+        extract_archive(str(download_archive(name, md5, year, download_dir)), str(download_dir))
 
     (out_dir / "names.txt").write_text("\n".join(CONFIG["classes"]) + "\n")
 
