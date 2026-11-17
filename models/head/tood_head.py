@@ -330,14 +330,15 @@ class TOODHead(Head):
         probs = cls_scores.reshape(-1, self.num_classes)
         targets_onehot = F.one_hot(labels, self.num_classes + 1)[:, :-1].to(probs.dtype)
 
-        # the normalizers are averaged over the processes of distributed training
+        # the normalizers are averaged over the processes of distributed training, only in training mode
         if initial:
             loss_cls = self.focal_loss(probs, targets_onehot).sum()
-            cls_factor = reduce_mean(pos.sum().to(probs.dtype)).item()
+            cls_factor = pos.sum().to(probs.dtype)
         else:
             loss_cls = self.aligned_focal_loss(probs, targets_onehot * metrics[:, None]).sum()
-            cls_factor = reduce_mean(metrics.sum()).item()
+            cls_factor = metrics.sum()
 
+        cls_factor = (reduce_mean(cls_factor) if self.training else cls_factor).item()
         loss_cls = loss_cls / (cls_factor if cls_factor >= 1e-12 else 1)
         loss_box = boxes.sum() * 0
         box_weights = metrics[pos]
@@ -346,7 +347,8 @@ class TOODHead(Head):
             box_weights = self.centerness(anchors.repeat(len(targets), 1)[pos], gt_boxes[pos])
 
         # every process joins the average, also without positives
-        box_factor = reduce_mean(box_weights.sum()).item()
+        box_factor = box_weights.sum()
+        box_factor = (reduce_mean(box_factor) if self.training else box_factor).item()
 
         if pos.any():
             # the GIoU loss weight is 2, computed in strides

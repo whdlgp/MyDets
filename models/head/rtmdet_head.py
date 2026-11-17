@@ -267,8 +267,9 @@ class RTMDetSepBNHead(Head):
         assign_metrics = torch.cat(assign_metrics)
         pos = labels < self.num_classes
 
-        # the normalizer is the sum of the IoU targets, averaged over the processes of distributed training
-        avg_factor = reduce_mean(assign_metrics.sum()).clamp_(min=1).item()
+        # the normalizer is the sum of the IoU targets, averaged over the processes of distributed training only in training mode
+        avg_factor = assign_metrics.sum()
+        avg_factor = (reduce_mean(avg_factor) if self.training else avg_factor).clamp_(min=1).item()
 
         # each loss sum is first divided by 1 plus the float32 eps, then by the sum of the IoU targets
         eps = torch.finfo(torch.float32).eps
