@@ -153,7 +153,7 @@ def main():
 
     Train is VOC2007 and VOC2012 trainval with the difficult objects, and val is VOC2007 test with the difficult objects in ignores.
     The archives come from the mirror of pjreddie, or from the official site when the mirror fails, and are kept in out_dir/downloads.
-    Interrupted downloads continue from where they stopped.
+    Interrupted downloads continue from where they stopped, and a finished dataset is not prepared again.
 
     Usage: uv run datatools\\download_voc.py [out_dir]
     """
@@ -164,13 +164,16 @@ def main():
     out_dir = Path(sys.argv[1] if len(sys.argv) == 2 else CONFIG["out_dir"])
     download_dir = out_dir / "downloads"
 
+    # names.txt is written last, so it marks a finished conversion
+    if (out_dir / "names.txt").exists():
+        print(f"Already prepared: {out_dir}")
+        return
+
     # download and extract
     download_dir.mkdir(parents=True, exist_ok=True)
 
     for name, md5, year in CONFIG["archives"]:
         extract_archive(str(download_archive(name, md5, year, download_dir)), str(download_dir))
-
-    (out_dir / "names.txt").write_text("\n".join(CONFIG["classes"]) + "\n")
 
     # convert each split
     for split, sets in CONFIG["splits"].items():
@@ -199,6 +202,7 @@ def main():
             print(f"{split}: {year} {image_set}, {len(image_ids)} images")
 
     shutil.rmtree(download_dir / "VOCdevkit")
+    (out_dir / "names.txt").write_text("\n".join(CONFIG["classes"]) + "\n")
     print(f"\nSaved: {out_dir}")
 
 

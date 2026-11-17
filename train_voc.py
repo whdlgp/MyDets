@@ -7,7 +7,10 @@ def main():
 
     Usage: uv run train_voc.py <config>
     """
+    print("Preparing PASCAL VOC")
     subprocess.run([sys.executable, "datatools/download_voc.py"], check=True)
+
+    print("\nTraining")
     subprocess.run([sys.executable, "train.py", *sys.argv[1:]], check=True)
 
 

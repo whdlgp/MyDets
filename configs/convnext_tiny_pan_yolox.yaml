@@ -1,7 +1,7 @@
 # convnext tiny backbone, PAN neck and YOLOX head
 
 common:
-  image_size: [640, 640]           # width, height
+  image_size: [416, 416]           # width, height
   mean: [0.485, 0.456, 0.406]      # imagenet
   std: [0.229, 0.224, 0.225]
 
