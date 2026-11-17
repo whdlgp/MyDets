@@ -67,6 +67,7 @@ train:
         fill: 128                  # padding gray
 
 predict:
+  score_threshold: 0.3             # minimum score of the drawn boxes
   transforms:
     - type: KeepRatioResize        # batches of one image
       args:
