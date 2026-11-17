@@ -20,3 +20,6 @@ uv.lock
 
 # Datasets
 data/
+
+# Output
+runs/
