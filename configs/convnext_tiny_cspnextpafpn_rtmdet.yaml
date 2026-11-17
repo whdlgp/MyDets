@@ -20,7 +20,7 @@ model:
 train:
   dataset_dir: data/voc
   batch_size: 16
-  num_workers: 4
+  num_workers: 8
   epochs: 100
   warmup_epochs: 3
   freeze_epochs: 0
