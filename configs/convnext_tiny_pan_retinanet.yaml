@@ -1,34 +1,81 @@
 # convnext tiny backbone, PAN neck and RetinaNet head
 
 common:
-  image_size: [416, 416]           # width, height
-  mean: [0.485, 0.456, 0.406]      # imagenet
+  image_size: [416, 416]              # width, height
+  mean: [0.485, 0.456, 0.406]         # imagenet
   std: [0.229, 0.224, 0.225]
 
 model:
   backbone:
     type: TimmBackbone
     args:
-      name: convnext_tiny.fb_in1k    # timm model name with the weight tag
-      out_indices: [1, 2, 3]         # strides 8, 16, 32
+      name: convnext_tiny.fb_in1k     # timm name with the weight tag
+      out_indices: [1, 2, 3]          # strides 8, 16, 32
       pretrained: true
   neck:
     type: PAN
+    args:
+      out_channels: 256
+      group_norm: true                # group norm after each conv
+      extra_levels: 0                 # extra coarser levels, 0 or 1
   head:
     type: RetinaNetHead
+    args:
+      num_convs: 4                    # 3x3 convs per subnet
+      norm: none                      # none, bn or gn
+      prior_prob: 0.01                # initial foreground probability
+      octave_base_scale: 4.0          # anchor size of the first scale in strides
+      scales_per_octave: 3            # anchor scales per octave
+      aspect_ratios: [0.5, 1.0, 2.0]  # anchor height to width
+      iou_thresholds: [0.4, 0.5]      # background below, foreground at or above
+      focal_alpha: 0.25
+      focal_gamma: 2.0
+      box_loss: smooth_l1             # smooth_l1, giou, diou or ciou
+      smooth_l1_beta: 0.0             # 0 for L1
+      score_threshold: 0.05
+      pre_nms_topk: 1000              # boxes kept per level before NMS
+      nms_threshold: 0.5              # NMS IoU
+      max_detections: 100             # per image
 
 train:
   dataset_dir: data/voc
   batch_size: 16
   num_workers: 8
   epochs: 100
-  warmup_epochs: 3
-  freeze_epochs: 0
-  close_mosaic_epochs: 15
+  warmup_epochs: 3                    # linear warmup
+  freeze_epochs: 0                    # backbone frozen for the first epochs
+  close_mosaic_epochs: 15             # mosaic off for the last N + 1 epochs
   lr: 0.001
   weight_decay: 0.05
   ema: true
-  amp: true
+  amp: true                           # bfloat16 if supported
   seed: 0
+  transforms:                         # in order
+    - type: RandomScale               # before RandomCrop
+      args:
+        max_scale: 1.4                # also inverted as the minimum
+        step: 32                      # sides in multiples of this
+    - type: RandomCrop
+      args:
+        jitter: 0.3                   # crop or pad ratio of each side
+    - type: RandomFlip
+      args:
+        probability: 0.5
+    - type: RandomHSV
+      args:
+        hue: 0.1                      # ratio of the hue circle
+        saturation: 1.5
+        exposure: 1.5
+    - type: Mosaic                    # after RandomCrop
+      args:
+        probability: 0.5
+  val_transforms:
+    - type: Letterbox
+      args:
+        fill: 128                     # padding gray
 
 predict:
+  transforms:
+    - type: KeepRatioResize           # batches of one image
+      args:
+        step: 32                      # sides in multiples of this
