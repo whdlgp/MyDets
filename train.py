@@ -48,8 +48,9 @@ class Trainer:
         np.random.seed(self.train_config["seed"])
         torch.manual_seed(self.train_config["seed"])
 
-        # model
+        # model, with cudnn picking the fastest conv for each of the few input sizes
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        torch.backends.cudnn.benchmark = self.device.type == "cuda"
         self.model = build_model(config["model"], len(self.names)).to(self.device)
         self.network = self.prepare_model()
         self.ema = AveragedModel(self.model, multi_avg_fn=self.update_ema, use_buffers=True) if self.train_config["ema"] else None
@@ -62,8 +63,9 @@ class Trainer:
 
         self.scaler = torch.amp.GradScaler(self.device.type, enabled=self.amp_dtype == torch.float16)
 
-        # data
-        self.train_mode = "train"
+        # data, where close_mosaic_epochs N closes the last N + 1 epochs like the original YOLOX trainer
+        self.close_mosaic_epoch = self.epochs - self.train_config["close_mosaic_epochs"] - 1
+        self.mosaic = True
         self.train_loader, self.val_loader = self.create_loaders()
 
         # no weight decay on 1d parameters such as norms and biases
@@ -94,10 +96,10 @@ class Trainer:
             self.set_frozen(epoch < self.train_config["freeze_epochs"])
 
             # the last epochs train without the mosaic
-            mode = "train_no_mosaic" if epoch >= self.epochs - self.train_config["close_mosaic_epochs"] else "train"
+            mosaic = epoch < self.close_mosaic_epoch
 
-            if mode != self.train_mode:
-                self.train_mode = mode
+            if mosaic != self.mosaic:
+                self.mosaic = mosaic
                 self.train_loader, _ = self.create_loaders()
 
             record = {"epoch": epoch + 1, **self.train_one_epoch(epoch), **self.evaluate(epoch)}
@@ -133,7 +135,7 @@ class Trainer:
         sums, count = {}, 0
         progress = tqdm(self.train_loader, desc=f"epoch {epoch + 1}/{self.epochs} train", disable=not self.is_main, leave=False)
 
-        for images, targets in progress:
+        for step, (images, targets) in enumerate(progress):
             images = images.to(self.device, non_blocking=True)
             targets = self.move_targets(targets)
 
@@ -153,13 +155,19 @@ class Trainer:
             if self.ema is not None:
                 self.ema.update_parameters(self.model)
 
+            # keep the sums on the device, which saves a sync every step
             for name, value in losses.items():
-                sums[name] = sums.get(name, 0.0) + value.item() * len(targets)
+                sums[name] = sums.get(name, 0.0) + value.detach() * len(targets)
 
             count += len(targets)
-            progress.set_postfix(loss=f"{sums['loss'] / count:.3f}", lr=f"{self.optimizer.param_groups[0]['lr']:.2e}")
 
-        return {f"train_{name}": value / count for name, value in sums.items()}
+            # update the progress bar every 20 steps
+            if step % 20 == 0:
+                loss = sums["loss"].item() / count
+                lr = self.optimizer.param_groups[0]["lr"]
+                progress.set_postfix(loss=f"{loss:.3f}", lr=f"{lr:.2e}")
+
+        return {f"train_{name}": value.item() / count for name, value in sums.items()}
 
     @torch.no_grad()
     def evaluate(self, epoch: int) -> dict[str, float]:
@@ -191,11 +199,11 @@ class Trainer:
             evaluator.update(self.model.head.decode(outputs), targets, (images.shape[-1], images.shape[-2]))
 
             for name, value in losses.items():
-                sums[name] = sums.get(name, 0.0) + value.item() * len(targets)
+                sums[name] = sums.get(name, 0.0) + value * len(targets)
 
             count += len(targets)
 
-        return {**{f"val_{name}": value / count for name, value in sums.items()}, **evaluator.compute()}
+        return {**{f"val_{name}": value.item() / count for name, value in sums.items()}, **evaluator.compute()}
 
     def update_best(self, record: dict[str, float]) -> list[str]:
         """Update the bests with an epoch and save the new best weights.
@@ -334,12 +342,19 @@ class Trainer:
         return self.model
 
     def create_loaders(self) -> tuple[DataLoader, DataLoader]:
-        """Create the train loader of the current mode and the val loader."""
+        """Create the train loader, without the mosaic when it is closed, and the val loader."""
         common = self.config["common"]
         transform_args = (common["image_size"], common["mean"], common["std"])
         loader_args = (self.train_config["batch_size"], self.train_config["num_workers"])
-        train_loader = create_loader(self.dataset_dir / "train", create_transform(self.train_mode, *transform_args), loader_args[0], True, loader_args[1])
-        val_loader = create_loader(self.dataset_dir / "val", create_transform("val", *transform_args), loader_args[0], False, loader_args[1])
+        train_blocks = self.train_config["transforms"]
+
+        if not self.mosaic:
+            train_blocks = [b for b in train_blocks if b["type"] != "Mosaic"]
+
+        train_transform = create_transform(train_blocks, *transform_args)
+        val_transform = create_transform(self.train_config["val_transforms"], *transform_args)
+        train_loader = create_loader(self.dataset_dir / "train", train_transform, loader_args[0], True, loader_args[1])
+        val_loader = create_loader(self.dataset_dir / "val", val_transform, loader_args[0], False, loader_args[1])
         return train_loader, val_loader
 
     def create_scheduler(self) -> SequentialLR:

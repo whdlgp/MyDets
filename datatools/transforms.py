@@ -1,6 +1,5 @@
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Literal
 import math
 import random
 
@@ -37,6 +36,19 @@ def clip_boxes(boxes: np.ndarray, region: tuple[int, int, int, int]) -> np.ndarr
     boxes[:, [1, 3]] = boxes[:, [1, 3]].clip(top, bottom)
     keep = (boxes[:, 2] - boxes[:, 0] >= 1) & (boxes[:, 3] - boxes[:, 1] >= 1)
     return boxes[keep]
+
+
+def check_sizes(batch: Batch, name: str) -> None:
+    """Raise an error unless every image of the batch has the output size.
+
+    Args:
+        batch: batch to check.
+        name: transform that needs the sizes, for the message.
+    """
+    sizes = {image.shape[1::-1] for image in batch.images}
+
+    if sizes != {tuple(batch.size)}:
+        raise ValueError(f"{name} needs images of the output size {tuple(batch.size)}, got {sorted(sizes)}, check the order of the transforms")
 
 
 class ToBatch:
@@ -203,6 +215,7 @@ class Mosaic:
         if random.random() >= self.probability:
             return batch
 
+        check_sizes(batch, "Mosaic")
         width, height = batch.size
         count = len(batch.images)
         images, boxes = [], []
@@ -234,6 +247,14 @@ class Mosaic:
 class Letterbox:
     """Resize each image keeping the aspect ratio and pad it to the output size."""
 
+    def __init__(self, fill: int = 128) -> None:
+        """Initialize the transform.
+
+        Args:
+            fill: gray level of the padding.
+        """
+        self.fill = fill
+
     def __call__(self, batch: Batch) -> Batch:
         """Letterbox every image of the batch."""
         width, height = batch.size
@@ -246,9 +267,8 @@ class Letterbox:
             else:
                 new_width, new_height = image_width * height // image_height, height
 
-            # the padding is mid gray
             left, top = (width - new_width) // 2, (height - new_height) // 2
-            boxed = np.full((height, width, 3), 128, np.uint8)
+            boxed = np.full((height, width, 3), self.fill, np.uint8)
             boxed[top:top + new_height, left:left + new_width] = cv2.resize(image, (new_width, new_height), interpolation=cv2.INTER_LINEAR)
             batch.images[i] = boxed
 
@@ -259,8 +279,8 @@ class Letterbox:
         return batch
 
 
-class Resize:
-    """Resize each image keeping the aspect ratio, with sides in multiples of step."""
+class KeepRatioResize:
+    """Resize each image keeping the aspect ratio, with sides rounded to multiples of step and no padding."""
 
     def __init__(self, step: int = 32) -> None:
         """Initialize the transform.
@@ -271,7 +291,7 @@ class Resize:
         self.step = step
 
     def __call__(self, batch: Batch) -> Batch:
-        """Resize every image of the batch."""
+        """Resize every image of the batch and take the new size as the output size."""
         width, height = batch.size
 
         for i, (image, boxes) in enumerate(zip(batch.images, batch.boxes)):
@@ -286,6 +306,12 @@ class Resize:
             moved[:, :4] = boxes[:, :4] * ([new_width / image_width, new_height / image_height] * 2)
             batch.boxes[i] = moved
 
+        sizes = {image.shape[1::-1] for image in batch.images}
+
+        if len(sizes) > 1:
+            raise ValueError("KeepRatioResize gives each image its own size, use batches of one image")
+
+        batch.size = sizes.pop()
         return batch
 
 
@@ -311,6 +337,8 @@ class Normalize:
         Returns:
             Images of shape (B, 3, H, W), and the targets of each image with the ignored boxes in extras.
         """
+        check_sizes(batch, "Normalize")
+
         # bgr to rgb
         images = torch.from_numpy(np.stack(batch.images)).permute(0, 3, 1, 2).flip(1)
         images = (images.float() / 255 - self.mean) / self.std
@@ -349,11 +377,22 @@ class Compose:
         return output
 
 
-def create_transform(mode: Literal["train", "train_no_mosaic", "val", "predict"], image_size: tuple[int, int], mean: tuple[float, float, float], std: tuple[float, float, float]) -> Compose:
-    """Create the transform of a mode, used as the collate function.
+TRANSFORMS = [
+    KeepRatioResize,
+    Letterbox,
+    Mosaic,
+    RandomCrop,
+    RandomFlip,
+    RandomHSV,
+    RandomScale
+]
+
+
+def create_transform(blocks: list[dict], image_size: tuple[int, int], mean: tuple[float, float, float], std: tuple[float, float, float]) -> Compose:
+    """Create a transform from config blocks, between ToBatch and Normalize, used as the collate function.
 
     Args:
-        mode: train with augmentation, train_no_mosaic without the mosaic, val with letterbox, or predict with resize for batches of one image.
+        blocks: transforms in order, each as {"type": class name, "args": constructor arguments}.
         image_size: (width, height) of the output images, multiples of the model strides.
         mean: mean of each RGB channel, for pixel values in [0, 1].
         std: standard deviation of each RGB channel, for pixel values in [0, 1].
@@ -361,10 +400,14 @@ def create_transform(mode: Literal["train", "train_no_mosaic", "val", "predict"]
     Returns:
         Transform from dataset samples to the model input and the targets.
     """
-    blocks = {
-        "train": [RandomScale(), RandomCrop(), RandomFlip(), RandomHSV(), Mosaic()],
-        "train_no_mosaic": [RandomScale(), RandomCrop(), RandomFlip(), RandomHSV()],
-        "val": [Letterbox()],
-        "predict": [Resize()]
-    }
-    return Compose([ToBatch(image_size), *blocks[mode], Normalize(mean, std)])
+    classes = {cls.__name__: cls for cls in TRANSFORMS}
+    transforms = []
+
+    for block in blocks:
+        if block["type"] not in classes:
+            raise ValueError(f"unknown transform {block['type']}, expected one of {sorted(classes)}")
+
+        cls = classes[block["type"]]
+        transforms.append(cls(**(block.get("args") or {})))
+
+    return Compose([ToBatch(image_size), *transforms, Normalize(mean, std)])
