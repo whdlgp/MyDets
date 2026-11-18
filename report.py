@@ -6,12 +6,10 @@ import csv
 import json
 import sys
 
-import yaml
-
 from datatools.loader import IMAGE_SUFFIXES
 from models.builder import build_model
 from shared.output_directory import OutputDirectory
-from shared.settings import CommonSettings, TrainSettings, read_settings
+from shared.settings import CommonSettings, TrainSettings, read_config, read_settings
 
 
 def exit_with_usage(error: str | None = None) -> NoReturn:
@@ -99,7 +97,7 @@ def main():
         exit_with_usage(f"no {', '.join(missing)} in {output.path}")
 
     # read the training
-    config = yaml.safe_load(output.config.read_text())
+    config = read_config(output.config)
     names = output.names.read_text().splitlines()
     result = json.loads(output.result.read_text())
 

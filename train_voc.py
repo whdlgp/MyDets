@@ -2,10 +2,8 @@ from pathlib import Path
 import subprocess
 import sys
 
-import yaml
-
 from shared.output_directory import OutputDirectory
-from shared.settings import TrainSettings, read_settings
+from shared.settings import TrainSettings, read_config, read_settings
 
 
 def main():
@@ -19,7 +17,7 @@ def main():
         raise SystemExit("usage: uv run train_voc.py <config>")
 
     config_path = Path(sys.argv[1])
-    config = yaml.safe_load(config_path.read_text())
+    config = read_config(config_path)
     dataset_dir = Path(read_settings(TrainSettings, config, "train").dataset_dir)
     output = OutputDirectory.from_config(config_path)
 

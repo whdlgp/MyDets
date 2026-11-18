@@ -10,7 +10,6 @@ import time
 
 import numpy as np
 import torch
-import yaml
 from matplotlib.figure import Figure
 from torch import Tensor, nn
 from torch.optim import AdamW
@@ -26,7 +25,7 @@ from models.base import Targets
 from models.builder import build_model
 from shared.device import Device
 from shared.output_directory import OutputDirectory
-from shared.settings import CommonSettings, TrainSettings, read_settings
+from shared.settings import CommonSettings, TrainSettings, read_config, read_settings
 
 
 class Trainer:
@@ -408,7 +407,7 @@ def main():
     parser.add_argument("--device", help="torch device such as cuda:1 or cpu, the first gpu when available by default")
     args = parser.parse_args()
 
-    config = yaml.safe_load(args.config.read_text())
+    config = read_config(args.config)
     settings = read_settings(TrainSettings, config, "train")
     output = OutputDirectory.from_config(args.config)
 

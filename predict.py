@@ -6,7 +6,6 @@ import random
 import cv2
 import numpy as np
 import torch
-import yaml
 from torch import nn
 
 from datatools.loader import IMAGE_SUFFIXES
@@ -15,7 +14,7 @@ from models.base import Detections
 from models.builder import build_model
 from shared.device import Device
 from shared.output_directory import OutputDirectory
-from shared.settings import CommonSettings, PredictSettings, read_settings
+from shared.settings import CommonSettings, PredictSettings, read_config, read_settings
 
 CONFIG = {
     "weights": ["best_loss.pt", "best_map.pt"],
@@ -188,7 +187,7 @@ def main():
         exit_with_usage(f"--num-images must be at least 1, got {args.num_images}")
 
     # read the training
-    config = yaml.safe_load(output.config.read_text())
+    config = read_config(output.config)
     names = output.names.read_text().splitlines()
     common = read_settings(CommonSettings, config, "common")
     settings = read_settings(PredictSettings, config, "predict")

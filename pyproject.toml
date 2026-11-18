@@ -8,8 +8,8 @@ dependencies = [
     "matplotlib",
     "opencv-python-headless",
     "pycocotools",
-    "pyyaml",
     "timm",
+    "ruamel.yaml",
     "tqdm",
 ]
 

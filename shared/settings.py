@@ -1,4 +1,7 @@
 from dataclasses import MISSING, dataclass, field, fields
+from pathlib import Path
+
+from ruamel.yaml import YAML
 
 
 @dataclass
@@ -64,6 +67,11 @@ class PredictSettings:
 
     transforms: list[dict]
     score_threshold: float = 0.3
+
+
+def read_config(path: Path) -> dict:
+    """Read a config file into plain dicts and lists."""
+    return YAML(typ="safe").load(Path(path).read_text(encoding="utf-8"))
 
 
 def read_settings[T](cls: type[T], config: dict, section: str) -> T:
