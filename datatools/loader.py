@@ -3,7 +3,6 @@ from pathlib import Path
 
 import cv2
 import numpy as np
-import torch
 from torch import distributed as dist
 from torch.utils.data import DataLoader, Dataset, DistributedSampler
 
@@ -62,7 +61,7 @@ def init_worker(worker_id: int) -> None:
     cv2.setNumThreads(0)
 
 
-def create_loader(split_dir: Path, transform: Callable, batch_size: int, shuffle: bool, num_workers: int) -> DataLoader:
+def create_loader(split_dir: Path, transform: Callable, batch_size: int, shuffle: bool, num_workers: int, pin_memory: bool) -> DataLoader:
     """Create a data loader that runs the transform on each batch in the workers.
 
     In distributed training, the images are split over the processes.
@@ -73,6 +72,7 @@ def create_loader(split_dir: Path, transform: Callable, batch_size: int, shuffle
         batch_size: number of images per batch.
         shuffle: whether to shuffle the images every epoch.
         num_workers: number of worker processes.
+        pin_memory: copy the batches to pinned memory, for faster transfers to the gpu.
 
     Returns:
         Data loader of (images, targets).
@@ -86,7 +86,6 @@ def create_loader(split_dir: Path, transform: Callable, batch_size: int, shuffle
         shuffle = False
 
     # the workers stay alive over the epochs
-    pin_memory = torch.cuda.is_available()
     persistent_workers = num_workers > 0
     return DataLoader(dataset, batch_size, shuffle=shuffle, sampler=sampler, num_workers=num_workers, collate_fn=transform,
                       worker_init_fn=init_worker, pin_memory=pin_memory, persistent_workers=persistent_workers)

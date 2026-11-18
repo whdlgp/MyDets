@@ -10,6 +10,8 @@ import yaml
 
 from datatools.loader import IMAGE_SUFFIXES
 from models.builder import build_model
+from shared.output_directory import OutputDirectory
+from shared.settings import CommonSettings, TrainSettings, read_settings
 
 
 def exit_with_usage(error: str | None = None) -> NoReturn:
@@ -20,9 +22,9 @@ def exit_with_usage(error: str | None = None) -> NoReturn:
     """
     lines = [error, ""] if error else []
     lines += [
-        "usage: uv run report.py <run_dir>",
+        "usage: uv run report.py <output_dir>",
         "",
-        "run_dir",
+        "output_dir",
         "├─ config.yaml",
         "├─ names.txt",
         "├─ log.csv",
@@ -81,36 +83,38 @@ def describe_module(module_config: dict) -> str:
 
 
 def main():
-    """Summarize a training run in a report, from the files train.py saved.
+    """Summarize a training in a report, from the files train.py saved.
 
-    Usage: uv run report.py <run_dir>
-    Saved as <run_dir>/report.txt.
+    Usage: uv run report.py <output_dir>
+    Saved as <output_dir>/report.txt.
     """
     # read the arguments
     if len(sys.argv) != 2:
         exit_with_usage()
 
-    run_dir = Path(sys.argv[1])
-    missing = [name for name in ["config.yaml", "names.txt", "log.csv", "result.json"] if not (run_dir / name).exists()]
+    output = OutputDirectory(Path(sys.argv[1]))
+    missing = [path.name for path in [output.config, output.names, output.log, output.result] if not path.exists()]
 
     if missing:
-        exit_with_usage(f"no {', '.join(missing)} in {run_dir}")
+        exit_with_usage(f"no {', '.join(missing)} in {output.path}")
 
-    # read the run
-    config = yaml.safe_load((run_dir / "config.yaml").read_text())
-    names = (run_dir / "names.txt").read_text().splitlines()
-    result = json.loads((run_dir / "result.json").read_text())
+    # read the training
+    config = yaml.safe_load(output.config.read_text())
+    names = output.names.read_text().splitlines()
+    result = json.loads(output.result.read_text())
 
-    with open(run_dir / "log.csv") as f:
+    with open(output.log) as f:
         log = [{k: float(v) for k, v in row.items()} for row in csv.DictReader(f)]
 
-    model, train, common = config["model"], config["train"], config["common"]
+    model = config["model"]
+    train = read_settings(TrainSettings, config, "train")
+    common = read_settings(CommonSettings, config, "common")
     best_map, best_loss, last = result["best_map50_95"], result["best_val_loss"], log[-1]
-    width, height = common["image_size"]
+    width, height = common.image_size
 
     # the image counts of the dataset folder now, only when it is still there
-    data_rows = [("dataset", f"{train['dataset_dir']}, {len(names)} classes")]
-    images = count_images(Path(train["dataset_dir"]))
+    data_rows = [("dataset", f"{train.dataset_dir}, {len(names)} classes")]
+    images = count_images(Path(train.dataset_dir))
 
     if images:
         data_rows.append(("images", images))
@@ -124,10 +128,10 @@ def main():
         ]),
         ("data", data_rows),
         ("training", [
-            ("epochs", f"{len(log)} of {train['epochs']}, batch {train['batch_size']}, input {width}x{height}"),
-            ("schedule", f"warmup {train['warmup_epochs']}, freeze {train['freeze_epochs']}, close mosaic {train['close_mosaic_epochs']} (last {train['close_mosaic_epochs'] + 1} epochs)"),
-            ("optimizer", f"AdamW, lr {train['lr']}, weight decay {train['weight_decay']}"),
-            ("ema / amp", f"{'on' if train['ema'] else 'off'} / {'on' if train['amp'] else 'off'}"),
+            ("epochs", f"{len(log)} of {train.epochs}, batch {train.batch_size}, input {width}x{height}"),
+            ("schedule", f"warmup {train.warmup_epochs}, freeze {train.freeze_epochs}, close mosaic {train.close_mosaic_epochs} (last {train.close_mosaic_epochs + 1} epochs)"),
+            ("optimizer", f"AdamW, lr {train.lr}, weight decay {train.weight_decay}"),
+            ("ema / amp", f"{'on' if train.ema else 'off'} / {'on' if train.amp else 'off'}"),
             ("time", str(timedelta(seconds=round(sum(row["time"] for row in log)))))
         ]),
         ("results", [
@@ -137,10 +141,10 @@ def main():
         ])
     ]
 
-    report = format_tree(f"MyDets report: {run_dir.name}", sections)
-    (run_dir / "report.txt").write_text(report + "\n", encoding="utf-8")
+    report = format_tree(f"MyDets report: {output.path.name}", sections)
+    output.report.write_text(report + "\n", encoding="utf-8")
     print(report)
-    print(f"\nSaved: {run_dir / 'report.txt'}")
+    print(f"\nSaved: {output.report}")
 
 
 if __name__ == "__main__":

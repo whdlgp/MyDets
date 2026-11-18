@@ -1,11 +1,11 @@
 from datetime import timedelta
 from pathlib import Path
+import argparse
 import csv
 import json
 import math
 import random
 import shutil
-import sys
 import time
 
 import numpy as np
@@ -24,60 +24,56 @@ from datatools.transforms import create_transform
 from metrics.evaluator import Evaluator
 from models.base import Targets
 from models.builder import build_model
+from shared.device import Device
+from shared.output_directory import OutputDirectory
+from shared.settings import CommonSettings, TrainSettings, read_settings
 
 
 class Trainer:
     """Train a detector from a config and save the weights, logs and curves."""
 
-    def __init__(self, config: dict, out_dir: Path) -> None:
-        """Initialize the trainer, resuming from last.pt in out_dir if it exists.
+    def __init__(self, config: dict, output: OutputDirectory, device: Device) -> None:
+        """Initialize the trainer, resuming from last.pt in the output directory if it exists.
 
         Args:
             config: config with the common, model and train sections.
-            out_dir: directory to save the outputs.
+            output: output directory to save the weights, logs and curves.
+            device: device to train on, with the mixed precision of the train section.
         """
         self.config = config
-        self.train_config = config["train"]
-        self.out_dir = out_dir
-        self.dataset_dir = Path(self.train_config["dataset_dir"])
+        self.common = read_settings(CommonSettings, config, "common")
+        self.settings = read_settings(TrainSettings, config, "train")
+        self.output = output
+        self.device = device
+        self.dataset_dir = Path(self.settings.dataset_dir)
         self.names = (self.dataset_dir / "names.txt").read_text().splitlines()
-        self.epochs = self.train_config["epochs"]
+        self.epochs = self.settings.epochs
         self.is_main = True
 
-        random.seed(self.train_config["seed"])
-        np.random.seed(self.train_config["seed"])
-        torch.manual_seed(self.train_config["seed"])
+        random.seed(self.settings.seed)
+        np.random.seed(self.settings.seed)
+        torch.manual_seed(self.settings.seed)
 
-        # model, with cudnn picking the fastest conv for each of the few input sizes
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        torch.backends.cudnn.benchmark = self.device.type == "cuda"
-        self.model = build_model(config["model"], len(self.names)).to(self.device)
+        # model
+        self.model = build_model(config["model"], len(self.names)).to(self.device.torch_device)
         self.network = self.prepare_model()
-        self.ema = AveragedModel(self.model, multi_avg_fn=self.update_ema, use_buffers=True) if self.train_config["ema"] else None
-
-        # bf16 when the gpu supports it, otherwise fp16 with gradient scaling
-        self.amp_dtype = None
-
-        if self.train_config["amp"] and self.device.type == "cuda":
-            self.amp_dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
-
-        self.scaler = torch.amp.GradScaler(self.device.type, enabled=self.amp_dtype == torch.float16)
+        self.ema = AveragedModel(self.model, multi_avg_fn=self.update_ema, use_buffers=True) if self.settings.ema else None
 
         # data, where close_mosaic_epochs N closes the last N + 1 epochs like the original YOLOX trainer
-        self.close_mosaic_epoch = self.epochs - self.train_config["close_mosaic_epochs"] - 1
+        self.close_mosaic_epoch = self.epochs - self.settings.close_mosaic_epochs - 1
         self.mosaic = True
         self.train_loader, self.val_loader = self.create_loaders()
 
         # no weight decay on 1d parameters such as norms and biases
         decay = [p for p in self.model.parameters() if p.ndim > 1]
         no_decay = [p for p in self.model.parameters() if p.ndim <= 1]
-        self.optimizer = AdamW([{"params": decay, "weight_decay": self.train_config["weight_decay"]}, {"params": no_decay, "weight_decay": 0.0}], lr=self.train_config["lr"])
+        self.optimizer = AdamW([{"params": decay, "weight_decay": self.settings.weight_decay}, {"params": no_decay, "weight_decay": 0.0}], lr=self.settings.lr)
         self.scheduler = self.create_scheduler()
 
         self.history = []
         self.best = {"val_loss": {"value": math.inf, "epoch": 0}, "map50_95": {"value": -math.inf, "epoch": 0}}
 
-        if (self.out_dir / "last.pt").exists():
+        if self.output.last.exists():
             self.load_checkpoint()
 
     def fit(self) -> None:
@@ -86,14 +82,15 @@ class Trainer:
         epoch_times = []
 
         if self.is_main:
-            print(f"amp: {str(self.amp_dtype).removeprefix('torch.') if self.amp_dtype else 'off'}, device: {self.device}")
+            amp_dtype = self.device.amp_dtype
+            print(f"amp: {str(amp_dtype).removeprefix('torch.') if amp_dtype else 'off'}, device: {self.device.torch_device}")
 
             if start_epoch:
-                print(f"resumed from epoch {start_epoch}: {self.out_dir}")
+                print(f"resumed from epoch {start_epoch}: {self.output.path}")
 
         for epoch in range(start_epoch, self.epochs):
             start = time.time()
-            self.set_frozen(epoch < self.train_config["freeze_epochs"])
+            self.set_frozen(epoch < self.settings.freeze_epochs)
 
             # the last epochs train without the mosaic
             mosaic = epoch < self.close_mosaic_epoch
@@ -136,20 +133,20 @@ class Trainer:
         progress = tqdm(self.train_loader, desc=f"epoch {epoch + 1}/{self.epochs} train", disable=not self.is_main, leave=False)
 
         for step, (images, targets) in enumerate(progress):
-            images = images.to(self.device, non_blocking=True)
+            images = images.to(self.device.torch_device, non_blocking=True)
             targets = self.move_targets(targets)
 
             # only the forward runs in mixed precision, and the losses in float32
-            with torch.autocast(self.device.type, dtype=self.amp_dtype, enabled=self.amp_dtype is not None):
+            with self.device.autocast():
                 outputs = self.network(images, targets)
 
             outputs = {k: v.float() if v.is_floating_point() else v for k, v in outputs.items()}
             losses = self.model.head.loss(outputs, targets, state)
 
             self.optimizer.zero_grad(set_to_none=True)
-            self.scaler.scale(losses["loss"]).backward()
-            self.scaler.step(self.optimizer)
-            self.scaler.update()
+            self.device.scaler.scale(losses["loss"]).backward()
+            self.device.scaler.step(self.optimizer)
+            self.device.scaler.update()
             self.scheduler.step()
 
             if self.ema is not None:
@@ -188,10 +185,10 @@ class Trainer:
         sums, count = {}, 0
 
         for images, targets in tqdm(self.val_loader, desc=f"epoch {epoch + 1}/{self.epochs} val", disable=not self.is_main, leave=False):
-            images = images.to(self.device, non_blocking=True)
+            images = images.to(self.device.torch_device, non_blocking=True)
             targets = self.move_targets(targets)
 
-            with torch.autocast(self.device.type, dtype=self.amp_dtype, enabled=self.amp_dtype is not None):
+            with self.device.autocast():
                 outputs = network(images)
 
             outputs = {k: v.float() if v.is_floating_point() else v for k, v in outputs.items()}
@@ -228,7 +225,7 @@ class Trainer:
             self.best[name] = {"value": record[name], "epoch": record["epoch"]}
 
             if self.is_main:
-                torch.save(weights, self.out_dir / {"val_loss": "best_loss.pt", "map50_95": "best_map.pt"}[name])
+                self.output.save(weights, {"val_loss": self.output.best_loss, "map50_95": self.output.best_map}[name])
 
         return improved
 
@@ -238,23 +235,23 @@ class Trainer:
 
     def save_checkpoint(self) -> None:
         """Save the state to resume (last.pt)."""
-        torch.save({
+        self.output.save({
             "model": self.model.state_dict(),
             "ema": self.ema.state_dict() if self.ema is not None else None,
             "optimizer": self.optimizer.state_dict(),
             "scheduler": self.scheduler.state_dict(),
-            "scaler": self.scaler.state_dict(),
             "history": self.history,
             "best": self.best,
             "random": random.getstate(),
             "numpy": np.random.get_state(),
             "torch": torch.get_rng_state(),
-            "cuda": torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None
-        }, self.out_dir / "last.pt")
+            "device": self.device.state()
+        }, self.output.last)
 
     def load_checkpoint(self) -> None:
-        """Restore the state from last.pt."""
-        state = torch.load(self.out_dir / "last.pt", map_location=self.device, weights_only=False)
+        """Restore the state from last.pt, also one saved on another device."""
+        # the numpy random state needs pickle
+        state = self.output.load(self.output.last, weights_only=False)
         self.model.load_state_dict(state["model"])
 
         if self.ema is not None:
@@ -262,19 +259,16 @@ class Trainer:
 
         self.optimizer.load_state_dict(state["optimizer"])
         self.scheduler.load_state_dict(state["scheduler"])
-        self.scaler.load_state_dict(state["scaler"])
         self.history = state["history"]
         self.best = state["best"]
         random.setstate(state["random"])
         np.random.set_state(state["numpy"])
         torch.set_rng_state(state["torch"])
-
-        if state["cuda"] is not None and torch.cuda.is_available():
-            torch.cuda.set_rng_state_all(state["cuda"])
+        self.device.restore(state["device"])
 
     def save_log(self) -> None:
         """Save the records of the epochs (log.csv)."""
-        with open(self.out_dir / "log.csv", "w", newline="") as f:
+        with open(self.output.log, "w", newline="") as f:
             writer = csv.DictWriter(f, fieldnames=list(self.history[0]))
             writer.writeheader()
             writer.writerows(self.history)
@@ -296,7 +290,7 @@ class Trainer:
             ax.set_ylabel(label)
             ax.legend()
 
-        fig.savefig(self.out_dir / "curve.png", dpi=120, bbox_inches="tight")
+        fig.savefig(self.output.curve, dpi=120, bbox_inches="tight")
 
     def print_summary(self, record: dict[str, float], improved: list[str], epoch_times: list[float]) -> None:
         """Print the losses, the mAP and the bests of an epoch as a tree.
@@ -330,7 +324,7 @@ class Trainer:
         """Save the records of the two bests (result.json)."""
         result = {f"best_{name}": self.history[best["epoch"] - 1] for name, best in self.best.items()}
 
-        with open(self.out_dir / "result.json", "w") as f:
+        with open(self.output.result, "w") as f:
             json.dump(result, f, indent=2)
 
     # ==========================================================
@@ -343,24 +337,23 @@ class Trainer:
 
     def create_loaders(self) -> tuple[DataLoader, DataLoader]:
         """Create the train loader, without the mosaic when it is closed, and the val loader."""
-        common = self.config["common"]
-        transform_args = (common["image_size"], common["mean"], common["std"])
-        loader_args = (self.train_config["batch_size"], self.train_config["num_workers"])
-        train_blocks = self.train_config["transforms"]
+        transform_args = (self.common.image_size, self.common.mean, self.common.std)
+        batch_size, num_workers, pin_memory = self.settings.batch_size, self.settings.num_workers, self.device.pin_memory
+        train_blocks = self.settings.transforms
 
         if not self.mosaic:
             train_blocks = [b for b in train_blocks if b["type"] != "Mosaic"]
 
         train_transform = create_transform(train_blocks, *transform_args)
-        val_transform = create_transform(self.train_config["val_transforms"], *transform_args)
-        train_loader = create_loader(self.dataset_dir / "train", train_transform, loader_args[0], True, loader_args[1])
-        val_loader = create_loader(self.dataset_dir / "val", val_transform, loader_args[0], False, loader_args[1])
+        val_transform = create_transform(self.settings.val_transforms, *transform_args)
+        train_loader = create_loader(self.dataset_dir / "train", train_transform, batch_size, True, num_workers, pin_memory)
+        val_loader = create_loader(self.dataset_dir / "val", val_transform, batch_size, False, num_workers, pin_memory)
         return train_loader, val_loader
 
     def create_scheduler(self) -> SequentialLR:
         """Create a linear warmup followed by a cosine decay to 0, stepped every batch."""
         steps_per_epoch = len(self.train_loader)
-        warmup_steps = max(self.train_config["warmup_epochs"] * steps_per_epoch, 1)
+        warmup_steps = max(self.settings.warmup_epochs * steps_per_epoch, 1)
         cosine_steps = max(self.epochs * steps_per_epoch - warmup_steps, 1)
         warmup = LinearLR(self.optimizer, start_factor=1 / warmup_steps, total_iters=warmup_steps)
         cosine = CosineAnnealingLR(self.optimizer, T_max=cosine_steps)
@@ -377,7 +370,8 @@ class Trainer:
 
     def move_targets(self, targets: list[Targets]) -> list[Targets]:
         """Move the targets of a batch to the device."""
-        return [Targets(t.boxes.to(self.device), t.labels.to(self.device), {k: v.to(self.device) for k, v in t.extras.items()}) for t in targets]
+        device = self.device.torch_device
+        return [Targets(t.boxes.to(device), t.labels.to(device), {k: v.to(device) for k, v in t.extras.items()}) for t in targets]
 
     @staticmethod
     def update_ema(averaged: list[Tensor], current: list[Tensor], num_averaged: Tensor) -> None:
@@ -406,23 +400,28 @@ def main():
 
     The outputs and copies of the config and the class names are saved in runs/<config name>/, and an existing last.pt there is resumed.
 
-    Usage: uv run train.py configs\\<config>.yaml
+    Usage: uv run train.py configs\\<config>.yaml [--device cuda:1]
     """
     # read the arguments
-    if len(sys.argv) != 2:
-        raise SystemExit("usage: uv run train.py configs\\<config>.yaml")
+    parser = argparse.ArgumentParser(description="Train a detector from a config file.")
+    parser.add_argument("config", type=Path, help="config file, such as configs\\<config>.yaml")
+    parser.add_argument("--device", help="torch device such as cuda:1 or cpu, the first gpu when available by default")
+    args = parser.parse_args()
 
-    config_path = Path(sys.argv[1])
-    config = yaml.safe_load(config_path.read_text())
-    out_dir = Path("runs") / config_path.stem
+    config = yaml.safe_load(args.config.read_text())
+    settings = read_settings(TrainSettings, config, "train")
+    output = OutputDirectory.from_config(args.config)
+
+    # benchmark picks the fastest conv for each of the few input sizes of training
+    device = Device(args.device, amp=settings.amp, benchmark=True)
 
     # keep what inference needs next to the weights
-    out_dir.mkdir(parents=True, exist_ok=True)
-    shutil.copy(config_path, out_dir / "config.yaml")
-    shutil.copy(Path(config["train"]["dataset_dir"]) / "names.txt", out_dir / "names.txt")
+    output.path.mkdir(parents=True, exist_ok=True)
+    shutil.copy(args.config, output.config)
+    shutil.copy(Path(settings.dataset_dir) / "names.txt", output.names)
 
-    Trainer(config, out_dir).fit()
-    print(f"\nSaved: {out_dir}")
+    Trainer(config, output, device).fit()
+    print(f"\nSaved: {output.path}")
 
 
 if __name__ == "__main__":
