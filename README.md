@@ -37,37 +37,147 @@ My object detection framework aiming to be copyleft-free
 - Checked against the official code
 - Small differences may remain
 
-## Usage
+## Setup
 
-### Setup
+Install [uv](https://docs.astral.sh/uv/)
+
+```
+pip install uv
+```
+
+If pip does not work, use the official installer
+
+```
+# Windows (PowerShell)
+powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
+
+# Linux
+curl -LsSf https://astral.sh/uv/install.sh | sh
+```
+
+Install the dependencies
 
 ```
 uv sync
 ```
 
-### Train
+## Quick start
 
 ```
-uv run train.py <config>
 uv run train_voc.py <config>
+uv run train_coco.py <config>
 ```
 
-- `train_voc.py`: downloads PASCAL VOC first, needs a `*_voc.yaml` config
+| Script | Dataset | Config |
+| --- | --- | --- |
+| `train_voc.py` | PASCAL VOC 07+12 | `configs/*_voc.yaml` |
+| `train_coco.py` | COCO 2017 | `configs/*_coco.yaml` |
 
-### Predict
+- Downloads and converts the dataset on the first run
+- Trains, draws predictions on 16 random val images and writes a report
 
-```
-uv run predict.py <run_dir> <image or folder>
-```
-
-- Image: one result
-- Folder: 16 random images in a grid
-
-### Example
+Example
 
 ```
 uv run train_voc.py configs\convnext_tiny_pan_yolox_voc.yaml
-uv run predict.py runs\convnext_tiny_pan_yolox_voc data\voc\val\images
+```
+
+## Train with your own data
+
+### 1. Prepare the dataset
+
+```
+my_dataset
+├─ names.txt         one class name per line
+├─ train
+│  ├─ images         jpg, jpeg, png or bmp
+│  └─ labels         one txt per image, same file name
+└─ val
+   ├─ images
+   ├─ labels
+   └─ ignores        optional, boxes ignored in evaluation
+```
+
+Label file, one box per line
+
+```
+class cx cy w h
+```
+
+- `class`: line index in `names.txt`, from 0
+- `cx cy w h`: box center and size, normalized to 0~1 by the image width and height
+- No objects: an empty file, or no file
+
+```
+0 0.512 0.430 0.210 0.380
+2 0.150 0.700 0.120 0.300
+```
+
+### 2. Make a config
+
+- Copy a config in `configs/`
+- Change `train.dataset_dir` to your dataset
+
+```yaml
+train:
+  dataset_dir: data/my_dataset
+  epochs: 100
+  batch_size: 16
+```
+
+| Section | Content |
+| --- | --- |
+| `common` | input size and normalization |
+| `model` | backbone, neck and head with their arguments |
+| `train` | dataset, schedule, augmentation |
+| `predict` | score threshold and transforms for inference |
+
+### 3. Train
+
+```
+uv run train.py configs\my_model.yaml
+```
+
+- Saves in `runs/<config name>/`
+- Running again resumes from `last.pt`
+
+### 4. Predict
+
+```
+uv run predict.py runs\my_model <image or folder>
+```
+
+| Input | Output |
+| --- | --- |
+| Image | Boxes drawn on the image |
+| Folder | 16 random images in a 4x4 grid |
+
+- One result per best weights, `best_loss.pt` and `best_map.pt`
+- Saved in `runs/<config name>/predict/`
+
+### 5. Report
+
+```
+uv run report.py runs\my_model
+```
+
+- Model, data, training settings, time and best results in one summary
+- Saves as `runs/<config name>/report.txt`
+
+## Outputs
+
+```
+runs/<config name>
+├─ best_loss.pt       weights of the best val loss
+├─ best_map.pt        weights of the best mAP50:95
+├─ last.pt            state to resume
+├─ log.csv            losses and mAP of every epoch
+├─ curve.png          loss and mAP curves
+├─ result.json        records of the two bests
+├─ config.yaml        copy for predict and report
+├─ names.txt          copy for predict and report
+├─ predict/           drawn predictions
+└─ report.txt         summary of the run
 ```
 
 ## License
