@@ -1,0 +1,74 @@
+{
+  "modes": {
+    "light": {
+      "bg": "#F6F7F9",
+      "surface": "#FFFFFF",
+      "surface-2": "#FBFBFC",
+      "hover": "#F5F6F8",
+      "border": "#E3E5EA",
+      "border-soft": "#EEF0F3",
+      "border-strong": "#D5D8DE",
+      "text": "#111318",
+      "text-2": "#5B6170",
+      "text-3": "#8A909C",
+      "label": "#3F4451",
+      "grey-soft": "#EEF0F3",
+      "ok": "#15803D",
+      "ok-soft": "#E7F6EC",
+      "warn": "#B45309",
+      "warn-soft": "#FDF1E4",
+      "bad": "#B91C1C",
+      "bad-soft": "#FDECEC",
+      "console": "#0F1117",
+      "console-text": "#E6E8EC"
+    },
+    "dark": {
+      "bg": "#0E1014",
+      "surface": "#16191F",
+      "surface-2": "#1B1F26",
+      "hover": "#1E222A",
+      "border": "#2A2F38",
+      "border-soft": "#222731",
+      "border-strong": "#3A404B",
+      "text": "#E6E8EC",
+      "text-2": "#A0A6B1",
+      "text-3": "#737A86",
+      "label": "#C3C8D1",
+      "grey-soft": "#242932",
+      "ok": "#4ADE80",
+      "ok-soft": "#13291C",
+      "warn": "#FBBF24",
+      "warn-soft": "#2E2410",
+      "bad": "#F87171",
+      "bad-soft": "#311618",
+      "console": "#0A0C10",
+      "console-text": "#E6E8EC"
+    }
+  },
+  "accents": {
+    "blue": {
+      "light": {"accent": "#2563EB", "accent-soft": "#EAF1FE", "accent-text": "#FFFFFF"},
+      "dark": {"accent": "#60A5FA", "accent-soft": "#162338", "accent-text": "#0B1220"}
+    },
+    "teal": {
+      "light": {"accent": "#0D9488", "accent-soft": "#E6F6F4", "accent-text": "#FFFFFF"},
+      "dark": {"accent": "#2DD4BF", "accent-soft": "#0F2A28", "accent-text": "#04201D"}
+    },
+    "purple": {
+      "light": {"accent": "#7C3AED", "accent-soft": "#F1EBFE", "accent-text": "#FFFFFF"},
+      "dark": {"accent": "#A78BFA", "accent-soft": "#221A38", "accent-text": "#160F2B"}
+    },
+    "pink": {
+      "light": {"accent": "#DB2777", "accent-soft": "#FCE8F2", "accent-text": "#FFFFFF"},
+      "dark": {"accent": "#F472B6", "accent-soft": "#331526", "accent-text": "#2A0A1B"}
+    },
+    "amber": {
+      "light": {"accent": "#C2410C", "accent-soft": "#FDEEE5", "accent-text": "#FFFFFF"},
+      "dark": {"accent": "#FBBF24", "accent-soft": "#2E2410", "accent-text": "#231803"}
+    },
+    "green": {
+      "light": {"accent": "#15803D", "accent-soft": "#E7F6EC", "accent-text": "#FFFFFF"},
+      "dark": {"accent": "#4ADE80", "accent-soft": "#13291C", "accent-text": "#06200F"}
+    }
+  }
+}

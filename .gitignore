@@ -19,7 +19,13 @@ uv.lock
 .ipynb_checkpoints/
 
 # Datasets
-data/
+/data/
 
 # Output
-runs/
+/runs/
+
+# User Config files
+/configs/user/
+
+# Web UI
+.nicegui/

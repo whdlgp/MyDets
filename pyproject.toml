@@ -11,6 +11,8 @@ dependencies = [
     "timm",
     "ruamel.yaml",
     "tqdm",
+    "nicegui",
+    "psutil",
 ]
 
 [tool.uv]

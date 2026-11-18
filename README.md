@@ -72,7 +72,35 @@ Supported devices
 - Uses the first GPU when available, the CPU otherwise
 - `--device` picks one, such as `cuda:1` or `cpu`
 
-## Quick start
+## Usage
+
+Two ways to use it: the web UI or the command line.
+Both read the configs in `configs/` and the datasets in `data/`, and write to `runs/`, so a training started in one shows up in the other.
+
+### Web UI
+
+```
+uv run webui\app.py
+```
+
+Opens http://localhost:8080 in the browser.
+
+<img src="assets/webui/showcase.png" alt="MyDets web UI" width="720">
+
+| Page | What it does |
+| --- | --- |
+| Trainings | Every training in `runs/`: start, stop or resume it on a chosen device, watch the loss, mAP and console, see the best weights and the report, draw predictions |
+| Configs | Copy a config into `configs/user/`, edit it in a form or as text, then start its training |
+| Datasets | Check the datasets in `data/` with their structure, classes and labels drawn on random images, and download VOC or COCO |
+
+- Trainings and downloads keep going when the web UI is closed
+- One training per device
+- A config is locked once its training starts; copy it to train with other settings
+- English and Korean, light and dark themes
+
+### Command line
+
+#### Quick start
 
 ```
 uv run train_voc.py <config>
@@ -93,9 +121,9 @@ Example
 uv run train_voc.py configs\convnext_tiny_pan_yolox_voc.yaml
 ```
 
-## Train with your own data
+#### Train with your own data
 
-### 1. Prepare the dataset
+##### 1. Prepare the dataset
 
 ```
 my_dataset
@@ -124,7 +152,7 @@ class cx cy w h
 2 0.150 0.700 0.120 0.300
 ```
 
-### 2. Make a config
+##### 2. Make a config
 
 - Copy a config in `configs/`
 - Change `train.dataset_dir` to your dataset
@@ -143,7 +171,7 @@ train:
 | `train` | dataset, schedule, augmentation |
 | `predict` | score threshold and transforms for inference |
 
-### 3. Train
+##### 3. Train
 
 ```
 uv run train.py configs\my_model.yaml
@@ -153,7 +181,7 @@ uv run train.py configs\my_model.yaml --device cuda:1
 - Saves in `runs/<config name>/`
 - Running again resumes from `last.pt`, also on another device
 
-### 4. Predict
+##### 4. Predict
 
 ```
 uv run predict.py runs\my_model <image or folder>
@@ -175,7 +203,7 @@ uv run predict.py runs\my_model <folder> --weights best_map.pt --num-images 9 --
 - One result per weights
 - Saved in `runs/<config name>/predict/`
 
-### 5. Report
+##### 5. Report
 
 ```
 uv run report.py runs\my_model
@@ -183,6 +211,25 @@ uv run report.py runs\my_model
 
 - Model, data, training settings, time and best results in one summary
 - Saves as `runs/<config name>/report.txt`
+
+## Example runs
+
+- Model: ConvNeXt-T, PAN and YOLOX, input 416×416
+- Configs: `convnext_tiny_pan_yolox_voc` and `convnext_tiny_pan_yolox_coco`
+- mAP: on the val split, by pycocotools
+
+| Train → val | Epochs | Best epoch | mAP50-95 | mAP50 | Time |
+| --- | --- | --- | --- | --- | --- |
+| VOC 07+12 → 07 test | 100 | 67 | 0.594 | 0.829 | 9.4 h |
+| COCO 2017 train → val | 24 | 24 | 0.364 | 0.551 | 13.8 h |
+
+<img src="assets/runs/voc.png" alt="VOC run" width="720">
+
+<img src="assets/runs/coco.png" alt="COCO run" width="720">
+
+<sub>Loss and mAP per epoch, and `best_map.pt` on 16 random val images. VOC above, COCO below.</sub>
+
+Still looking for better settings.
 
 ## Outputs
 
@@ -197,7 +244,9 @@ runs/<config name>
 ├─ config.yaml        copy for predict and report
 ├─ names.txt          copy for predict and report
 ├─ predict/           drawn predictions
-└─ report.txt         summary of the run
+├─ report.txt         summary of the run
+├─ console.log        output of a training started from the web UI
+└─ train.pid          process of a training started from the web UI
 ```
 
 ## License
