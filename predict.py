@@ -1,7 +1,7 @@
 from pathlib import Path
 from typing import NoReturn
+import argparse
 import random
-import sys
 
 import cv2
 import numpy as np
@@ -13,6 +13,9 @@ from datatools.loader import IMAGE_SUFFIXES
 from datatools.transforms import Compose, create_transform
 from models.base import Detections
 from models.builder import build_model
+from shared.device import Device
+from shared.output_directory import OutputDirectory
+from shared.settings import CommonSettings, PredictSettings, read_settings
 
 CONFIG = {
     "weights": ["best_loss.pt", "best_map.pt"],
@@ -31,9 +34,9 @@ def exit_with_usage(error: str | None = None) -> NoReturn:
     """
     lines = [error, ""] if error else []
     lines += [
-        "usage: uv run predict.py <run_dir> <image or image_dir>",
+        "usage: uv run predict.py <output_dir> <image or image_dir> [--weights ...] [--num-images N] [--seed S] [--device D]",
         "",
-        "run_dir",
+        "output_dir",
         *[f"├─ {name}" for name in CONFIG["weights"]],
         "├─ config.yaml",
         "└─ names.txt"
@@ -45,7 +48,7 @@ def load_model(config: dict, num_classes: int, weights_path: Path, device: torch
     """Build the model of a config and load its weights.
 
     Args:
-        config: config of the run.
+        config: config of the training.
         num_classes: number of object classes.
         weights_path: weights saved by train.py.
         device: device to run the model on.
@@ -54,7 +57,7 @@ def load_model(config: dict, num_classes: int, weights_path: Path, device: torch
         Model in eval mode.
     """
     model = build_model(config["model"], num_classes)
-    model.load_state_dict(torch.load(weights_path, map_location="cpu", weights_only=True))
+    model.load_state_dict(OutputDirectory.load(weights_path))
     return model.to(device).eval()
 
 
@@ -114,18 +117,19 @@ def draw_detections(image: np.ndarray, detections: Detections, names: list[str],
     return drawn
 
 
-def make_grid(images: list[np.ndarray]) -> np.ndarray:
+def make_grid(images: list[np.ndarray], num_images: int) -> np.ndarray:
     """Fit each image in a square tile keeping its aspect ratio and tile them in a square grid.
 
     Args:
         images: BGR images, at most num_images.
+        num_images: number of tiles, which sets the grid size.
 
     Returns:
         Grid image, with empty tiles when there are fewer images.
     """
     tile, gap = CONFIG["tile_size"], CONFIG["gap"]
-    columns = round(CONFIG["num_images"] ** 0.5)
-    rows = (CONFIG["num_images"] + columns - 1) // columns
+    columns = round(num_images ** 0.5)
+    rows = (num_images + columns - 1) // columns
     grid = np.full((rows * tile + (rows - 1) * gap, columns * tile + (columns - 1) * gap, 3), 255, np.uint8)
 
     for i, image in enumerate(images):
@@ -155,30 +159,41 @@ def read_image(path: Path) -> np.ndarray:
 
 
 def main():
-    """Draw the detections of the best models of a run on one image, or on random images of a folder as a grid.
+    """Draw the detections of the best models of a training on one image, or on random images of a folder as a grid.
 
-    Usage: uv run predict.py <run_dir> <image or image_dir>
-    Saved in <run_dir>/predict/ with the weights name at the end.
+    Usage: uv run predict.py <output_dir> <image or image_dir> [--weights best_map.pt] [--num-images 16] [--seed 0] [--device cuda:1]
+    Saved in <output_dir>/predict/ with the weights name at the end.
     """
     # read the arguments
-    if len(sys.argv) != 3:
-        exit_with_usage()
+    parser = argparse.ArgumentParser(description="Draw the detections of the best models of a training.")
+    parser.add_argument("output_dir", type=Path, help="output directory of train.py, such as runs\\<config name>")
+    parser.add_argument("input", type=Path, help="image, or folder to pick random images from")
+    parser.add_argument("--weights", nargs="+", choices=CONFIG["weights"], default=CONFIG["weights"], help="weights to draw with")
+    parser.add_argument("--num-images", type=int, default=CONFIG["num_images"], help="number of random images in the grid")
+    parser.add_argument("--seed", type=int, default=CONFIG["seed"], help="seed of the random images, the same seed picks the same images")
+    parser.add_argument("--device", help="torch device such as cuda:1 or cpu, the first gpu when available by default")
+    args = parser.parse_args()
 
-    run_dir, input_path = Path(sys.argv[1]), Path(sys.argv[2])
-    missing = [name for name in CONFIG["weights"] if not (run_dir / name).exists()]
+    output = OutputDirectory(args.output_dir)
+    input_path = args.input
+    missing = [name for name in args.weights if not (output.path / name).exists()]
 
     if missing:
-        exit_with_usage(f"no {', '.join(missing)} in {run_dir}")
+        exit_with_usage(f"no {', '.join(missing)} in {output.path}")
 
     if not input_path.exists():
         exit_with_usage(f"no such image or directory: {input_path}")
 
-    # read the run
-    config = yaml.safe_load((run_dir / "config.yaml").read_text())
-    names = (run_dir / "names.txt").read_text().splitlines()
-    common, predict_config = config["common"], config["predict"]
-    transform = create_transform(predict_config["transforms"], common["image_size"], common["mean"], common["std"])
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    if args.num_images < 1:
+        exit_with_usage(f"--num-images must be at least 1, got {args.num_images}")
+
+    # read the training
+    config = yaml.safe_load(output.config.read_text())
+    names = output.names.read_text().splitlines()
+    common = read_settings(CommonSettings, config, "common")
+    settings = read_settings(PredictSettings, config, "predict")
+    transform = create_transform(settings.transforms, common.image_size, common.mean, common.std)
+    device = Device(args.device).torch_device
 
     # read the images
     if input_path.is_file():
@@ -189,24 +204,23 @@ def main():
         if not paths:
             exit_with_usage(f"no images in {input_path}")
 
-        # the same random images every run
-        paths = random.Random(CONFIG["seed"]).sample(paths, min(CONFIG["num_images"], len(paths)))
+        # the same seed picks the same images
+        paths = random.Random(args.seed).sample(paths, min(args.num_images, len(paths)))
 
     images = [read_image(path) for path in paths]
-    out_dir = run_dir / "predict"
-    out_dir.mkdir(exist_ok=True)
+    output.predict.mkdir(exist_ok=True)
     saved = []
 
     # draw with each best model
-    for weights_name in CONFIG["weights"]:
-        model = load_model(config, len(names), run_dir / weights_name, device)
-        drawn = [draw_detections(image, predict_image(model, image, transform, device), names, predict_config["score_threshold"]) for image in images]
+    for weights_name in args.weights:
+        model = load_model(config, len(names), output.path / weights_name, device)
+        drawn = [draw_detections(image, predict_image(model, image, transform, device), names, settings.score_threshold) for image in images]
         stem = input_path.stem if input_path.is_file() else "grid"
-        out_path = out_dir / f"{stem}_{Path(weights_name).stem}.jpg"
-        cv2.imencode(".jpg", drawn[0] if input_path.is_file() else make_grid(drawn))[1].tofile(out_path)
+        out_path = output.predict / f"{stem}_{Path(weights_name).stem}.jpg"
+        cv2.imencode(".jpg", drawn[0] if input_path.is_file() else make_grid(drawn, args.num_images))[1].tofile(out_path)
         saved.append(out_path.name)
 
-    print(f"\nSaved: {out_dir} ({', '.join(saved)})")
+    print(f"\nSaved: {output.predict} ({', '.join(saved)})")
 
 
 if __name__ == "__main__":
