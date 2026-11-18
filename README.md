@@ -61,6 +61,17 @@ Install the dependencies
 uv sync
 ```
 
+Supported devices
+
+| Device | Status |
+| --- | --- |
+| NVIDIA GPU (Windows, Linux) | Supported, tested |
+| CPU (Windows, Linux) | Supported, slow for training |
+| AMD GPU (Linux) | Not blocked by the code, not tested yet |
+
+- Uses the first GPU when available, the CPU otherwise
+- `--device` picks one, such as `cuda:1` or `cpu`
+
 ## Quick start
 
 ```
@@ -136,15 +147,17 @@ train:
 
 ```
 uv run train.py configs\my_model.yaml
+uv run train.py configs\my_model.yaml --device cuda:1
 ```
 
 - Saves in `runs/<config name>/`
-- Running again resumes from `last.pt`
+- Running again resumes from `last.pt`, also on another device
 
 ### 4. Predict
 
 ```
 uv run predict.py runs\my_model <image or folder>
+uv run predict.py runs\my_model <folder> --weights best_map.pt --num-images 9 --seed 1
 ```
 
 | Input | Output |
@@ -152,7 +165,14 @@ uv run predict.py runs\my_model <image or folder>
 | Image | Boxes drawn on the image |
 | Folder | 16 random images in a 4x4 grid |
 
-- One result per best weights, `best_loss.pt` and `best_map.pt`
+| Option | Default | Content |
+| --- | --- | --- |
+| `--weights` | `best_loss.pt best_map.pt` | weights to draw with |
+| `--num-images` | 16 | images in the grid |
+| `--seed` | 0 | the same seed picks the same images |
+| `--device` | first GPU or CPU | device to run on |
+
+- One result per weights
 - Saved in `runs/<config name>/predict/`
 
 ### 5. Report
