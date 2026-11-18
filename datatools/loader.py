@@ -20,7 +20,7 @@ class DetectionDataset(Dataset):
             split_dir: split directory with images, labels and optional ignores, next to names.txt.
         """
         self.split_dir = Path(split_dir)
-        self.names = (self.split_dir.parent / "names.txt").read_text().split()
+        self.names = (self.split_dir.parent / "names.txt").read_text().splitlines()
         self.image_paths = sorted(p for p in (self.split_dir / "images").iterdir() if p.suffix.lower() in IMAGE_SUFFIXES)
 
     def __len__(self) -> int:

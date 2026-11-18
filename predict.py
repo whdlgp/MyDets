@@ -175,7 +175,7 @@ def main():
 
     # read the run
     config = yaml.safe_load((run_dir / "config.yaml").read_text())
-    names = (run_dir / "names.txt").read_text().split()
+    names = (run_dir / "names.txt").read_text().splitlines()
     common, predict_config = config["common"], config["predict"]
     transform = create_transform(predict_config["transforms"], common["image_size"], common["mean"], common["std"])
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")

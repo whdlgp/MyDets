@@ -40,7 +40,7 @@ class Trainer:
         self.train_config = config["train"]
         self.out_dir = out_dir
         self.dataset_dir = Path(self.train_config["dataset_dir"])
-        self.names = (self.dataset_dir / "names.txt").read_text().split()
+        self.names = (self.dataset_dir / "names.txt").read_text().splitlines()
         self.epochs = self.train_config["epochs"]
         self.is_main = True
 
