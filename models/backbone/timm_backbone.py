@@ -1,3 +1,5 @@
+import logging
+
 import timm
 from torch import Tensor
 
@@ -16,6 +18,10 @@ class TimmBackbone(Backbone):
             pretrained: whether to load the pretrained weights.
         """
         super().__init__()
+
+        # the hugging face hub warns about requests without a token on every run, which needs no action
+        logging.getLogger("huggingface_hub").setLevel(logging.ERROR)
+
         self.model = timm.create_model(name, pretrained=pretrained, features_only=True, out_indices=out_indices)
         self.out_channels = self.model.feature_info.channels()
         self.out_strides = self.model.feature_info.reduction()
