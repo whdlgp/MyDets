@@ -1,3 +1,8 @@
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="assets/logo-dark.svg">
+  <img src="assets/logo-light.svg" alt="MyDets" width="320">
+</picture>
+
 # MyDets
 
 My object detection framework aiming to be copyleft-free
