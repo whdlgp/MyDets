@@ -89,7 +89,7 @@ Opens http://localhost:8080 in the browser.
 
 | Page | What it does |
 | --- | --- |
-| Trainings | Every training in `runs/`: start, stop or resume it on a chosen device, watch the loss, mAP and console, see the best weights and the report, draw predictions, export to ONNX |
+| Trainings | Every training in `runs/`: start, stop or resume it on a chosen device, watch the loss, mAP and console, see the best weights and the report, draw predictions, export and quantize ONNX |
 | Configs | Copy a config into `configs/user/`, edit it in a form or as text, then start its training |
 | Datasets | Check the datasets in `data/` with their structure, classes and labels drawn on random images, and download VOC or COCO |
 
@@ -250,6 +250,25 @@ Tested exports
 - Checked against torch on onnxruntime 1.32, CPU
 - TOOD below opset 19 has no DeformConv, so it is exported as GridSample and Conv, slower
 - Input width and height must be multiples of 32
+
+## ONNX quantization
+
+Quantizes exported ONNX models to FP16 or INT8.
+
+```powershell
+uv run onnx_tools\quantize.py runs\my_model runs\my_model\export\best_map_416x416.onnx --mode fp16
+uv run onnx_tools\quantize.py runs\my_model runs\my_model\export\best_map_416x416.onnx --mode int8_static
+uv run onnx_tools\quantize.py runs\my_model runs\my_model\export\best_map_416x416.onnx --mode int8_dynamic
+```
+
+| Mode | Method | Output |
+| --- | --- | --- |
+| `fp16` | FP16 conversion | `_fp16.onnx` |
+| `int8_static` | Static quantization (QDQ) | `_int8_static.onnx` |
+| `int8_dynamic` | Dynamic quantization (QOperator) | `_int8_dynamic.onnx` |
+
+- Static quantization calibrates on up to 500 random images of the validation dataset
+- Saves quantized models in `runs/<config name>/export/`
 
 ## Example runs
 
