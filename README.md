@@ -89,7 +89,7 @@ Opens http://localhost:8080 in the browser.
 
 | Page | What it does |
 | --- | --- |
-| Trainings | Every training in `runs/`: start, stop or resume it on a chosen device, watch the loss, mAP and console, see the best weights and the report, draw predictions |
+| Trainings | Every training in `runs/`: start, stop or resume it on a chosen device, watch the loss, mAP and console, see the best weights and the report, draw predictions, export to ONNX |
 | Configs | Copy a config into `configs/user/`, edit it in a form or as text, then start its training |
 | Datasets | Check the datasets in `data/` with their structure, classes and labels drawn on random images, and download VOC or COCO |
 
@@ -212,6 +212,45 @@ uv run report.py runs\my_model
 - Model, data, training settings, time and best results in one summary
 - Saves as `runs/<config name>/report.txt`
 
+## ONNX export
+
+Exports a trained model to ONNX, and checks it against torch.
+
+```
+uv run onnx_tools\export.py runs\my_model
+uv run onnx_tools\verify.py runs\my_model runs\my_model\export\best_map_416x416.onnx <image>
+uv run onnx_tools\inference.py runs\my_model runs\my_model\export\best_map_416x416.onnx <image>
+```
+
+| Script | What it does |
+| --- | --- |
+| `export.py` | Saves the best weights as ONNX |
+| `verify.py` | Runs torch and ONNX on the same image, compares the raw outputs and draws both; `--visualize` shows it in a window |
+| `inference.py` | Runs the ONNX alone and draws the boxes |
+
+| Option | Default | Content |
+| --- | --- | --- |
+| `--weights` | `best_loss.pt best_map.pt` | weights to export |
+| `--image-size` | `common.image_size` | fixed input width and height |
+| `--dynamic` | off | dynamic batch and input size |
+| `--opset` | 19 | ONNX opset |
+| `--simplify` | off | simplify the graph with onnxsim |
+
+- Input: RGB 0~255, float32, (batch, 3, height, width), normalized inside
+- Output: the raw outputs of the head, without decode and NMS
+- Saved in `runs/<config name>/export/`
+
+Tested exports
+
+| Head | Fixed, opset 16~20 | Dynamic | Simplify |
+| --- | --- | --- | --- |
+| YOLOX, RTMDet, RetinaNet | ✓ | ✓ | ✓ |
+| TOOD | ✓ | ✓ | ✓ |
+
+- Checked against torch on onnxruntime 1.32, CPU
+- TOOD below opset 19 has no DeformConv, so it is exported as GridSample and Conv, slower
+- Input width and height must be multiples of 32
+
 ## Example runs
 
 - Model: ConvNeXt-T, PAN and YOLOX, input 416×416
@@ -245,6 +284,7 @@ runs/<config name>
 ├─ names.txt          copy for predict and report
 ├─ predict/           drawn predictions
 ├─ report.txt         summary of the run
+├─ export/            ONNX files and their verify and inference images
 ├─ console.log        output of a training started from the web UI
 └─ train.pid          process of a training started from the web UI
 ```
