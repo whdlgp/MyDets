@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from functools import cache
 from pathlib import Path
 import csv
 import json
@@ -27,8 +28,9 @@ class TrainStatus:
     model: str
 
 
+@cache
 def list_devices() -> list[tuple[str, str]]:
-    """List the devices as (name, description), asked in a short process so that the server never opens a gpu."""
+    """List the devices as (name, description), asked once in a short process so that the server never opens a gpu."""
     code = "import json; from shared.device import Device; print(json.dumps(Device.list_devices()))"
     completed = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=True)
     return [tuple(device) for device in json.loads(completed.stdout.strip().splitlines()[-1])]
@@ -60,7 +62,7 @@ def read_log(output: OutputDirectory) -> list[dict[str, float]]:
     if not output.log.exists():
         return []
 
-    with open(output.log, newline="") as f:
+    with output.log.open(newline="") as f:
         rows = list(csv.DictReader(f))
 
     # the training rewrites the whole file every epoch, so the last row may be cut while it writes
@@ -134,7 +136,7 @@ def start_process(arguments: list[str], console: Path, pid_path: Path, extra: di
     env = {**os.environ, "PYTHONUNBUFFERED": "1", "PYTHONIOENCODING": "utf-8", "TQDM_MININTERVAL": "5"}
     detach = {"creationflags": subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP} if sys.platform == "win32" else {"start_new_session": True}
     # the child keeps its own handle of the console file
-    with open(console, "a", encoding="utf-8") as stdout:
+    with console.open("a", encoding="utf-8") as stdout:
         process = subprocess.Popen([sys.executable, *arguments], stdout=stdout, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, env=env, **detach)
 
     info = {"pid": process.pid, "create_time": psutil.Process(process.pid).create_time(), **extra}
@@ -178,7 +180,7 @@ def read_console(console_path: Path, num_lines: int) -> list[str]:
     if not console_path.exists():
         return []
 
-    with open(console_path, encoding="utf-8", errors="replace", newline="") as f:
+    with console_path.open(encoding="utf-8", errors="replace", newline="") as f:
         text = f.read()
 
     # windows ends printed lines with \r\n, which must not be taken for the carriage return of a progress bar
@@ -224,3 +226,53 @@ def make_report(output_dir: Path) -> Path:
         raise RuntimeError(lines[-1] if lines else f"report.py exited with {completed.returncode}")
 
     return OutputDirectory(output_dir).report
+
+
+def run_script(arguments: list[str]) -> tuple[bool, str]:
+    """Run a python script of the project and wait for it.
+
+    Args:
+        arguments: script and its arguments.
+
+    Returns:
+        Whether it exited without an error, and its output.
+    """
+    environment = {**os.environ, "PYTHONWARNINGS": "ignore", "PYTHONIOENCODING": "utf-8"}
+    completed = subprocess.run([sys.executable, *arguments], capture_output=True, text=True, encoding="utf-8", errors="replace", env=environment)
+    output = (completed.stdout + completed.stderr).strip()
+    return completed.returncode == 0, output
+
+
+def export_onnx(output_dir: Path, weights: str, image_size: tuple[int, int] | None, opset: int, simplify: bool) -> tuple[bool, str]:
+    """Run onnx_tools/export.py on one weights file and wait for it.
+
+    Args:
+        output_dir: output directory with the best weights.
+        weights: weights file to export.
+        image_size: (width, height) of a fixed input size, None for a dynamic one.
+        opset: onnx opset version.
+        simplify: simplify the graph with onnxsim.
+
+    Returns:
+        Whether it exited without an error, and its output.
+    """
+    size = ["--image-size", *map(str, image_size)] if image_size else ["--dynamic"]
+    arguments = ["onnx_tools/export.py", str(output_dir), "--weights", weights, *size, "--opset", str(opset)]
+    return run_script(arguments + (["--simplify"] if simplify else []))
+
+
+def run_onnx_tool(tool: str, output_dir: Path, onnx_path: Path, image_path: Path) -> tuple[bool, str, Path]:
+    """Run onnx_tools/verify.py or onnx_tools/inference.py on an image and wait for it.
+
+    Args:
+        tool: verify or inference.
+        output_dir: output directory of the training.
+        onnx_path: onnx file in the export folder.
+        image_path: image to run on.
+
+    Returns:
+        Whether it exited without an error, its output, and the image it saved.
+    """
+    succeeded, output = run_script([f"onnx_tools/{tool}.py", str(output_dir), str(onnx_path), str(image_path)])
+    saved = OutputDirectory(output_dir).export / f"{image_path.stem}_{onnx_path.stem}_{tool}.jpg"
+    return succeeded, output, saved

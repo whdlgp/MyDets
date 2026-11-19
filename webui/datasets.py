@@ -1,6 +1,5 @@
 from dataclasses import dataclass
 from pathlib import Path
-import os
 import random
 
 import cv2
@@ -45,8 +44,7 @@ def list_stems(folder: Path, suffixes: set[str]) -> set[str]:
     if not folder.is_dir():
         return set()
 
-    with os.scandir(folder) as entries:
-        return {Path(e.name).stem for e in entries if Path(e.name).suffix.lower() in suffixes}
+    return {path.stem for path in folder.iterdir() if path.suffix.lower() in suffixes}
 
 
 def read_dataset(name: str) -> DatasetInfo:

@@ -1,17 +1,16 @@
+from collections.abc import Callable
 from pathlib import Path
 import asyncio
 import base64
 import inspect
 import json
-import os
 import re
 import sys
 import tempfile
 
-# the web ui runs from the project root, so that it finds the configs, runs and modules like the scripts do
+# the web ui runs from the project root like the scripts, and imports their modules from there
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-os.chdir(ROOT)
 print("Starting the MyDets web UI...", flush=True)
 
 from nicegui import app, run, ui
@@ -22,7 +21,7 @@ from shared.output_directory import OutputDirectory
 from shared.settings import CommonSettings, PredictSettings, TrainSettings, read_config
 from webui.configs import ConfigEntry, check_config, check_name, create_config, create_yaml, find_config, list_configs, load_config, save_config, write_config
 from webui.datasets import DatasetInfo, draw_sample, list_datasets, read_dataset, start_download, stop_download
-from webui.processes import TrainStatus, find_process, list_busy_devices, list_devices, list_statuses, make_report, predict_images, read_console, read_log, read_status, start_train, stop_process
+from webui.processes import RUNS_DIR, TrainStatus, export_onnx, find_process, list_busy_devices, list_devices, list_statuses, make_report, predict_images, read_console, read_log, read_status, run_onnx_tool, start_train, stop_process
 from webui.schema import CONNECTING_ARGS, FieldInfo, describe_class, describe_settings, list_types
 from webui.texts import TEXTS, get_language, t
 
@@ -127,26 +126,32 @@ MODES = {"light": False, "dark": True, "auto": None}
 
 
 # common parts
-def watch(read, initial: object, on_change) -> None:
-    """Read a value in a worker thread at every refresh and call on_change only when it changed.
+class Watcher:
+    """Reads a value in a worker thread at every refresh and calls on_change only when it changed.
 
     Reading files and processes off the event loop keeps clicks responsive, and drawing only on a change keeps buttons from being replaced under the pointer.
-
-    Args:
-        read: function that returns the value.
-        initial: value already drawn.
-        on_change: function called with the new value.
     """
-    last = {"value": initial}
 
-    async def check() -> None:
-        value = await run.io_bound(read)
+    def __init__(self, read: Callable[[], object], initial: object, on_change: Callable[[object], None]) -> None:
+        """Start reading.
 
-        if value != last["value"]:
-            last["value"] = value
-            on_change(value)
+        Args:
+            read: function that returns the value.
+            initial: value already drawn.
+            on_change: function called with the new value.
+        """
+        self.read = read
+        self.last = initial
+        self.on_change = on_change
+        ui.timer(CONFIG["refresh_seconds"], self.check)
 
-    ui.timer(CONFIG["refresh_seconds"], check)
+    async def check(self) -> None:
+        """Read the value and call on_change when it changed."""
+        value = await run.io_bound(self.read)
+
+        if value != self.last:
+            self.last = value
+            self.on_change(value)
 
 
 def add_frame(devices: list[tuple[str, str]], current: str) -> None:
@@ -173,29 +178,34 @@ def add_frame(devices: list[tuple[str, str]], current: str) -> None:
         ui.space()
 
         shown = {"busy": list_busy_devices()}
-
-        @ui.refreshable
-        def device_panel() -> None:
-            busy = shown["busy"]
-
-            with ui.column().classes("card w-full p-3 gap-2"):
-                ui.label(t("devices.title")).classes("caption font-semibold")
-
-                for name, description in devices:
-                    with ui.column().classes("gap-0 w-full"):
-                        with ui.row().classes("w-full justify-between items-center no-wrap"):
-                            ui.label(name).classes("text-sm font-semibold mono")
-                            ui.label(t("devices.in_use") if name in busy else t("devices.free")).classes(f"text-xs font-semibold {'text-link' if name in busy else 'text-ok'}")
-
-                        ui.label(f"{description} · {busy[name]}" if name in busy else description).classes("text-xs muted")
-
-        device_panel()
-        watch(list_busy_devices, shown["busy"], lambda busy: (shown.update(busy=busy), device_panel.refresh()))
+        device_panel = ui.refreshable(add_device_panel)
+        device_panel(devices, shown)
+        Watcher(list_busy_devices, shown["busy"], lambda busy: (shown.update(busy=busy), device_panel.refresh()))
 
         with ui.row().classes("w-full items-center justify-between mt-2 no-wrap"):
             languages = {code: texts["language.name"] for code, texts in TEXTS.items()}
             ui.toggle(languages, value=get_language(), on_change=lambda e: set_language(e.value)).props("dense no-caps unelevated toggle-color=primary")
             add_theme_menu(mode, accent)
+
+
+def add_device_panel(devices: list[tuple[str, str]], shown: dict) -> None:
+    """Add the devices of the side menu, free or in use by a training."""
+    busy = shown["busy"]
+
+    with ui.column().classes("card w-full p-3 gap-2"):
+        ui.label(t("devices.title")).classes("caption font-semibold")
+
+        for name, description in devices:
+            state = t("devices.in_use") if name in busy else t("devices.free")
+            color = "text-link" if name in busy else "text-ok"
+            detail = f"{description} · {busy[name]}" if name in busy else description
+
+            with ui.column().classes("gap-0 w-full"):
+                with ui.row().classes("w-full justify-between items-center no-wrap"):
+                    ui.label(name).classes("text-sm font-semibold mono")
+                    ui.label(state).classes(f"text-xs font-semibold {color}")
+
+                ui.label(detail).classes("text-xs muted")
 
 
 def get_theme() -> tuple[str, str]:
@@ -281,11 +291,11 @@ def describe_type(cls: type) -> str:
 
 def is_trained(entry: ConfigEntry) -> bool:
     """Return whether a config already has its training in runs/, also when it has just started."""
-    output = OutputDirectory(Path("runs") / entry.name)
+    output = OutputDirectory(RUNS_DIR / entry.name)
     return output.config.exists() or output.pid.exists()
 
 
-def add_device_menu(devices: list[tuple[str, str]], label: str, on_choose, props: str = "unelevated") -> None:
+def add_device_menu(devices: list[tuple[str, str]], label: str, on_choose: Callable[[str], None], props: str = "unelevated") -> None:
     """Add a button with a menu of the devices, where only the free ones can be chosen.
 
     Args:
@@ -312,7 +322,7 @@ def add_device_menu(devices: list[tuple[str, str]], label: str, on_choose, props
                     item.disable()
 
 
-def resume(name: str, device: str, on_done) -> None:
+def resume(name: str, device: str, on_done: Callable[[], None]) -> None:
     """Start a stopped or failed training again from its last.pt on a device."""
     entry = find_config(name)
 
@@ -325,11 +335,11 @@ def resume(name: str, device: str, on_done) -> None:
     on_done()
 
 
-def add_train_actions(status: TrainStatus, devices: list[tuple[str, str]], on_done, flat: bool) -> None:
+def add_train_actions(status: TrainStatus, devices: list[tuple[str, str]], on_done: Callable[[], None], flat: bool) -> None:
     """Add the stop button of a running training or the resume menu of a stopped or failed one."""
     if status.state == "training":
         def stop() -> None:
-            stop_process(OutputDirectory(Path("runs") / status.name).pid)
+            stop_process(OutputDirectory(RUNS_DIR / status.name).pid)
             ui.notify(t("notify.stopped", name=status.name))
             on_done()
 
@@ -341,82 +351,92 @@ def add_train_actions(status: TrainStatus, devices: list[tuple[str, str]], on_do
 
 
 # trainings
-def add_trainings_page(devices: list[tuple[str, str]]) -> None:
-    """Add the first page: every training in runs/, with the button that adds a new one."""
-    @ui.page("/")
-    def trainings_page() -> None:
-        add_frame(devices, "/")
-        shown = {"state": "all", "statuses": list_statuses()}
+@ui.page("/")
+def trainings_page() -> None:
+    """Show every training in runs/, with the button that adds a new one."""
+    devices = list_devices()
+    add_frame(devices, "/")
+    shown = {"state": "all", "statuses": list_statuses()}
+    training_list = ui.refreshable(add_training_list)
 
-        def update(statuses: list[TrainStatus]) -> None:
-            shown["statuses"] = statuses
-            training_list.refresh()
+    def update(statuses: list[TrainStatus]) -> None:
+        shown["statuses"] = statuses
+        training_list.refresh()
 
-        with ui.column().classes("w-full max-w-[1280px] px-8 py-7 gap-5"):
-            with add_page_title(t("trainings.title"), t("trainings.subtitle")):
-                ui.button(t("action.add"), icon="add", on_click=lambda: open_add_dialog(devices)).props("unelevated no-caps")
+    with ui.column().classes("w-full max-w-[1280px] px-8 py-7 gap-5"):
+        with add_page_title(t("trainings.title"), t("trainings.subtitle")):
+            ui.button(t("action.add"), icon="add", on_click=lambda: open_add_dialog(devices)).props("unelevated no-caps")
 
-            @ui.refreshable
-            def training_list() -> None:
-                statuses = shown["statuses"]
+        training_list(shown, devices, update)
+        Watcher(list_statuses, shown["statuses"], update)
 
-                if not statuses:
-                    with ui.column().classes("card w-full items-center gap-3 py-16"):
-                        ui.icon("model_training", size="40px").classes("faint")
-                        ui.label(t("trainings.empty")).classes("text-lg font-semibold")
-                        ui.label(t("trainings.empty_hint")).classes("text-sm muted")
-                        ui.button(t("action.add"), icon="add", on_click=lambda: open_add_dialog(devices)).props("unelevated no-caps").classes("mt-2")
 
-                    return
+def add_training_list(shown: dict, devices: list[tuple[str, str]], on_change: Callable[[list[TrainStatus]], None]) -> None:
+    """Add the state filter chips and a row per training, which opens the training on a click.
 
-                # filter chips
-                with ui.row().classes("gap-2"):
-                    for state in ["all"] + STATES:
-                        count = len(statuses) if state == "all" else sum(s.state == state for s in statuses)
+    Args:
+        shown: statuses on the page and the chosen state filter.
+        devices: (name, description) of every device.
+        on_change: function called with new statuses, after a filter change or a button.
+    """
+    statuses = shown["statuses"]
 
-                        if count == 0:
-                            continue
+    if not statuses:
+        with ui.column().classes("card w-full items-center gap-3 py-16"):
+            ui.icon("model_training", size="40px").classes("faint")
+            ui.label(t("trainings.empty")).classes("text-lg font-semibold")
+            ui.label(t("trainings.empty_hint")).classes("text-sm muted")
+            ui.button(t("action.add"), icon="add", on_click=lambda: open_add_dialog(devices)).props("unelevated no-caps").classes("mt-2")
 
-                        chip = ui.row().classes(f"chip {'active' if shown['state'] == state else ''}")
-                        chip.on("click", lambda state=state: (shown.update(state=state), training_list.refresh()))
+        return
 
-                        with chip:
-                            ui.label(t("state.all") if state == "all" else t(f"state.{state}"))
-                            ui.label(str(count)).classes("opacity-60")
+    # filter chips
+    with ui.row().classes("gap-2"):
+        for state in ["all"] + STATES:
+            count = len(statuses) if state == "all" else sum(s.state == state for s in statuses)
 
-                columns = "100px minmax(180px, 2fr) minmax(160px, 2fr) 70px 150px 100px 80px 110px"
+            if count == 0:
+                continue
 
-                with ui.column().classes("card w-full gap-0 overflow-x-auto"):
-                    with ui.grid(columns=columns).classes("w-full gap-x-4 list-head"):
-                        for key in ["status", "name", "model", "device", "progress", "best_map", "elapsed", "actions"]:
-                            ui.label(t(f"column.{key}"))
+            chip = ui.row().classes(f"chip {'active' if shown['state'] == state else ''}")
+            chip.on("click", lambda state=state: (shown.update(state=state), on_change(statuses)))
 
-                    for status in statuses:
-                        if shown["state"] not in ("all", status.state):
-                            continue
+            with chip:
+                ui.label(t("state.all") if state == "all" else t(f"state.{state}"))
+                ui.label(str(count)).classes("opacity-60")
 
-                        row = ui.grid(columns=columns).classes("w-full gap-x-4 items-center list-row clickable")
-                        row.on("click", lambda name=status.name: ui.navigate.to(f"/train/{name}"))
+    columns = "100px minmax(180px, 2fr) minmax(160px, 2fr) 70px 150px 100px 80px 110px"
 
-                        with row:
-                            add_pill(t(f"state.{status.state}"), f"state-{status.state}")
-                            ui.label(status.name).classes("font-semibold text-link truncate")
-                            ui.label(status.model).classes("text-sm muted truncate")
-                            ui.label(status.device or "—").classes("mono text-xs")
+    with ui.column().classes("card w-full gap-0 overflow-x-auto"):
+        with ui.grid(columns=columns).classes("w-full gap-x-4 list-head"):
+            for key in ["status", "name", "model", "device", "progress", "best_map", "elapsed", "actions"]:
+                ui.label(t(f"column.{key}"))
 
-                            with ui.row().classes("items-center gap-2 no-wrap"):
-                                ui.linear_progress(status.epoch / status.epochs if status.epochs else 0, show_value=False, size="6px").props(f"color={STATE_COLORS[status.state]}").classes("w-20")
-                                ui.label(f"{status.epoch} / {status.epochs}").classes("text-xs muted")
+        for status in statuses:
+            if shown["state"] not in ("all", status.state):
+                continue
 
-                            ui.label(f"{status.best_map:.3f}" if status.best_map is not None else "—").classes("mono")
-                            ui.label(format_seconds(status.elapsed)).classes("text-sm muted")
+            row = ui.grid(columns=columns).classes("w-full gap-x-4 items-center list-row clickable")
+            row.on("click", lambda name=status.name: ui.navigate.to(f"/train/{name}"))
+            progress = status.epoch / status.epochs if status.epochs else 0
+            best_map = f"{status.best_map:.3f}" if status.best_map is not None else "—"
 
-                            # the buttons must not open the training as the row click does
-                            with ui.row().classes("gap-1 no-wrap").on("click.stop", lambda: None):
-                                add_train_actions(status, devices, lambda: update(list_statuses()), flat=True)
+            with row:
+                add_pill(t(f"state.{status.state}"), f"state-{status.state}")
+                ui.label(status.name).classes("font-semibold text-link truncate")
+                ui.label(status.model).classes("text-sm muted truncate")
+                ui.label(status.device or "—").classes("mono text-xs")
 
-            training_list()
-            watch(list_statuses, shown["statuses"], update)
+                with ui.row().classes("items-center gap-2 no-wrap"):
+                    ui.linear_progress(progress, show_value=False, size="6px").props(f"color={STATE_COLORS[status.state]}").classes("w-20")
+                    ui.label(f"{status.epoch} / {status.epochs}").classes("text-xs muted")
+
+                ui.label(best_map).classes("mono")
+                ui.label(format_seconds(status.elapsed)).classes("text-sm muted")
+
+                # the buttons must not open the training as the row click does
+                with ui.row().classes("gap-1 no-wrap").on("click.stop", lambda: None):
+                    add_train_actions(status, devices, lambda: on_change(list_statuses()), flat=True)
 
 
 def open_add_dialog(devices: list[tuple[str, str]], config_name: str | None = None) -> None:
@@ -527,76 +547,94 @@ def summarize_model(config: dict) -> str:
 
 
 # training detail
-def add_training_page(devices: list[tuple[str, str]]) -> None:
-    """Add the page of one training, with the monitor, results and predict tabs."""
-    @ui.page("/train/{name}")
-    def training_page(name: str) -> None:
-        add_frame(devices, "/")
-        output = OutputDirectory(Path("runs") / name)
+@ui.page("/train/{name}")
+def training_page(name: str) -> None:
+    """Show one training, with the monitor, results, predict and export tabs."""
+    devices = list_devices()
+    add_frame(devices, "/")
+    output = OutputDirectory(RUNS_DIR / name)
 
-        with ui.column().classes("w-full max-w-[1280px] px-8 py-7 gap-4"):
-            ui.link(t("action.back_trainings"), "/").classes("text-sm muted no-underline")
+    with ui.column().classes("w-full max-w-[1280px] px-8 py-7 gap-4"):
+        ui.link(t("action.back_trainings"), "/").classes("text-sm muted no-underline")
 
-            # a training that was just started writes its config.yaml a moment later
-            if not output.config.exists():
-                starting = find_process(output.pid) is not None
-                ui.label(t("trainings.starting", name=name) if starting else t("trainings.missing", name=name)).classes("muted")
+        # a training that was just started writes its config.yaml a moment later
+        if not output.config.exists():
+            starting = find_process(output.pid) is not None
+            ui.label(t("trainings.starting", name=name) if starting else t("trainings.missing", name=name)).classes("muted")
 
-                if starting:
-                    ui.timer(1, ui.navigate.reload, once=True)
+            if starting:
+                ui.timer(1, ui.navigate.reload, once=True)
 
-                return
+            return
 
-            shown = {"status": read_status(output.path)}
+        shown = {"status": read_status(output.path)}
+        header = ui.refreshable(add_training_header)
 
-            def update(status: TrainStatus) -> None:
-                shown["status"] = status
-                header.refresh()
+        def update(status: TrainStatus) -> None:
+            shown["status"] = status
+            header.refresh()
 
-            @ui.refreshable
-            def header() -> None:
-                status = shown["status"]
-                entry = find_config(name)
-                config = read_config(output.config)
+        header(output, shown, devices, update)
+        Watcher(lambda: read_status(output.path), shown["status"], update)
 
-                with ui.row().classes("w-full items-start justify-between no-wrap"):
-                    with ui.column().classes("gap-1"):
-                        with ui.row().classes("items-center gap-3"):
-                            ui.label(name).classes("text-2xl font-bold")
-                            add_pill(t(f"state.{status.state}"), f"state-{status.state}")
+        with ui.tabs().classes("w-full divider-bottom").props("align=left no-caps dense") as tabs:
+            monitor_tab = ui.tab("monitor", t("tab.monitor"))
+            results_tab = ui.tab("results", t("tab.results"))
+            predict_tab = ui.tab("predict", t("tab.predict"))
+            export_tab = ui.tab("export", t("tab.export"))
 
-                        with ui.row().classes("items-center gap-2 text-sm muted"):
-                            if entry is not None:
-                                ui.link(entry.path.as_posix(), f"/configs/{name}").classes("mono text-xs")
-                                ui.label("·")
+        with ui.tab_panels(tabs, value=monitor_tab).classes("w-full bg-transparent").props("animated=false"):
+            with ui.tab_panel(monitor_tab).classes("p-0 gap-4"):
+                Monitor(output)
 
-                            ui.label(f"{summarize_model(config)} · {config['train']['dataset_dir']} · batch {config['train']['batch_size']}" + (f" · {status.device}" if status.device else ""))
+            with ui.tab_panel(results_tab).classes("p-0 gap-4"):
+                results_panel = ui.refreshable(add_results)
+                results_panel(output)
 
-                    with ui.row().classes("gap-2"):
-                        add_train_actions(status, devices, lambda: update(read_status(output.path)), flat=False)
+            with ui.tab_panel(predict_tab).classes("p-0 gap-4"):
+                predict_panel = ui.refreshable(add_predict)
+                predict_panel(output, devices)
 
-            header()
-            watch(lambda: read_status(output.path), shown["status"], update)
+            with ui.tab_panel(export_tab).classes("p-0 gap-4"):
+                export_panel = ui.refreshable(add_export)
+                export_panel(output)
 
-            with ui.tabs().classes("w-full divider-bottom").props("align=left no-caps dense") as tabs:
-                monitor_tab = ui.tab("monitor", t("tab.monitor"))
-                results_tab = ui.tab("results", t("tab.results"))
-                predict_tab = ui.tab("predict", t("tab.predict"))
+        # the results and the weights appear while the page is open, so these tabs are drawn again when opened
+        panels = {"results": results_panel, "predict": predict_panel, "export": export_panel}
+        tabs.on_value_change(lambda e: panels[e.value].refresh() if e.value in panels else None)
 
-            with ui.tab_panels(tabs, value=monitor_tab).classes("w-full bg-transparent").props("animated=false"):
-                with ui.tab_panel(monitor_tab).classes("p-0 gap-4"):
-                    add_monitor(output)
 
-                with ui.tab_panel(results_tab).classes("p-0 gap-4"):
-                    results_panel = ui.refreshable(add_results)
-                    results_panel(output)
+def add_training_header(output: OutputDirectory, shown: dict, devices: list[tuple[str, str]], on_change: Callable[[TrainStatus], None]) -> None:
+    """Add the name, state, config and model of a training with its stop or resume button.
 
-                with ui.tab_panel(predict_tab).classes("p-0 gap-4"):
-                    predict_panel = ui.refreshable(add_predict)
-                    predict_panel(output, devices)
+    Args:
+        output: output directory of the training.
+        shown: status on the page.
+        devices: (name, description) of every device.
+        on_change: function called with the new status after a button.
+    """
+    name = output.path.name
+    status = shown["status"]
+    entry = find_config(name)
+    config = read_config(output.config)
+    device = f" · {status.device}" if status.device else ""
+    summary = f"{summarize_model(config)} · {config['train']['dataset_dir']} · batch {config['train']['batch_size']}{device}"
 
-            # the results and the weights appear while the page is open, so these tabs are drawn again when opened
-            tabs.on_value_change(lambda e: results_panel.refresh() if e.value == "results" else predict_panel.refresh() if e.value == "predict" else None)
+    with ui.row().classes("w-full items-start justify-between no-wrap"):
+        with ui.column().classes("gap-1"):
+            with ui.row().classes("items-center gap-3"):
+                ui.label(name).classes("text-2xl font-bold")
+                add_pill(t(f"state.{status.state}"), f"state-{status.state}")
+
+            with ui.row().classes("items-center gap-2 text-sm muted"):
+                if entry is not None:
+                    ui.link(entry.path.as_posix(), f"/configs/{name}").classes("mono text-xs")
+                    ui.label("·")
+
+                ui.label(summary)
+
+        with ui.row().classes("gap-2"):
+            add_train_actions(status, devices, lambda: on_change(read_status(output.path)), flat=False)
 
 
 def parse_step(lines: list[str]) -> tuple[int, int] | None:
@@ -623,88 +661,105 @@ def make_chart_options(color: str) -> dict:
     }
 
 
-def add_monitor(output: OutputDirectory) -> None:
-    """Add the progress, the last values, the loss and mAP charts and the console, refreshed from log.csv and console.log."""
-    with ui.row().classes("card w-full p-5 items-center gap-8 no-wrap"):
-        with ui.column().classes("flex-1 gap-2"):
-            with ui.row().classes("w-full justify-between"):
-                epoch_label = ui.label().classes("font-semibold")
-                step_label = ui.label().classes("text-sm muted")
+class Monitor:
+    """Progress, last values, loss and mAP charts and console of a training, refreshed from log.csv and console.log."""
 
-            epoch_bar = ui.linear_progress(0, show_value=False, size="8px")
+    def __init__(self, output: OutputDirectory) -> None:
+        """Add the monitor and start refreshing it.
 
-        time_labels = {}
+        Args:
+            output: output directory of the training.
+        """
+        self.output = output
 
-        for key in ["elapsed", "remaining", "per_epoch"]:
-            with ui.column().classes("gap-0"):
-                ui.label(t(f"monitor.{key}")).classes("caption")
-                time_labels[key] = ui.label("—").classes("mono font-semibold")
+        with ui.row().classes("card w-full p-5 items-center gap-8 no-wrap"):
+            with ui.column().classes("flex-1 gap-2"):
+                with ui.row().classes("w-full justify-between"):
+                    self.epoch_label = ui.label().classes("font-semibold")
+                    self.step_label = ui.label().classes("text-sm muted")
 
-    value_labels = {}
+                self.epoch_bar = ui.linear_progress(0, show_value=False, size="8px")
 
-    with ui.grid(columns=4).classes("w-full gap-4"):
-        for key in ["train_loss", "val_loss", "map50", "map50_95"]:
-            with ui.column().classes("card p-4 gap-1"):
-                ui.label(t(f"metric.{key}")).classes("caption font-semibold")
-                value_labels[key] = (ui.label("—").classes("stat-value"), ui.label().classes("text-xs muted"))
+            self.time_labels = {}
 
-    empty_label = ui.label(t("monitor.no_log")).classes("text-sm muted")
+            for key in ["elapsed", "remaining", "per_epoch"]:
+                with ui.column().classes("gap-0"):
+                    ui.label(t(f"monitor.{key}")).classes("caption")
+                    self.time_labels[key] = ui.label("—").classes("mono font-semibold")
 
-    with ui.grid(columns=2).classes("w-full gap-4"):
-        charts = {}
+        self.value_labels = {}
 
-        for key, title in [("loss", t("chart.loss")), ("map", t("chart.map"))]:
-            with ui.column().classes("card p-4 gap-0"):
-                ui.label(title).classes("section-title")
-                charts[key] = ui.echart(make_chart_options(find_accent())).classes("w-full h-64")
+        with ui.grid(columns=4).classes("w-full gap-4"):
+            for key in ["train_loss", "val_loss", "map50", "map50_95"]:
+                with ui.column().classes("card p-4 gap-1"):
+                    ui.label(t(f"metric.{key}")).classes("caption font-semibold")
+                    self.value_labels[key] = (ui.label("—").classes("stat-value"), ui.label().classes("text-xs muted"))
 
-    with ui.column().classes("card w-full gap-0"):
-        with ui.row().classes("card-head w-full items-center justify-between"):
-            ui.label(t("tab.console")).classes("section-title")
-            full_switch = ui.switch(t("console.full", lines=CONFIG["console_lines"])).props("dense").classes("text-sm muted")
+        self.empty_label = ui.label(t("monitor.no_log")).classes("text-sm muted")
+        self.charts = {}
 
-        console = ui.label().classes("console mono w-full")
+        with ui.grid(columns=2).classes("w-full gap-4"):
+            for key, title in [("loss", t("chart.loss")), ("map", t("chart.map"))]:
+                with ui.column().classes("card p-4 gap-0"):
+                    ui.label(title).classes("section-title")
+                    self.charts[key] = ui.echart(make_chart_options(find_accent())).classes("w-full h-64")
 
-    def read() -> tuple[list[dict[str, float]], TrainStatus, list[str]]:
-        lines = read_console(output.console, CONFIG["console_lines"] if full_switch.value else CONFIG["console_tail"])
-        return read_log(output), read_status(output.path), lines
+        with ui.column().classes("card w-full gap-0"):
+            with ui.row().classes("card-head w-full items-center justify-between"):
+                ui.label(t("tab.console")).classes("section-title")
+                self.full_switch = ui.switch(t("console.full", lines=CONFIG["console_lines"])).props("dense").classes("text-sm muted")
 
-    def show(values: tuple[list[dict[str, float]], TrainStatus, list[str]]) -> None:
+            self.console = ui.label().classes("console mono w-full")
+
+        initial = self.read()
+        self.show(initial)
+        Watcher(self.read, initial, self.show)
+        self.full_switch.on_value_change(lambda: self.show(self.read()))
+
+    def read(self) -> tuple[list[dict[str, float]], TrainStatus, list[str]]:
+        """Read the log, the status and the console lines."""
+        num_lines = CONFIG["console_lines"] if self.full_switch.value else CONFIG["console_tail"]
+        lines = read_console(self.output.console, num_lines)
+        return read_log(self.output), read_status(self.output.path), lines
+
+    def show(self, values: tuple[list[dict[str, float]], TrainStatus, list[str]]) -> None:
+        """Draw the values that read returned."""
         log, status, lines = values
         step = parse_step(lines) if status.state == "training" else None
-        console.set_text("\n".join(lines) if lines else t("console.empty"))
-        epoch_label.set_text(t("monitor.epoch", epoch=status.epoch, epochs=status.epochs))
-        epoch_bar.set_value(status.epoch / status.epochs if status.epochs else 0)
-        step_label.set_text(t("monitor.step", step=step[0], steps=step[1]) if step else "")
-        empty_label.set_visibility(not log)
+        self.console.set_text("\n".join(lines) if lines else t("console.empty"))
+        self.epoch_label.set_text(t("monitor.epoch", epoch=status.epoch, epochs=status.epochs))
+        self.epoch_bar.set_value(status.epoch / status.epochs if status.epochs else 0)
+        self.step_label.set_text(t("monitor.step", step=step[0], steps=step[1]) if step else "")
+        self.empty_label.set_visibility(not log)
 
         if not log:
             return
 
         per_epoch = status.elapsed / len(log)
-        time_labels["elapsed"].set_text(format_seconds(status.elapsed))
-        time_labels["remaining"].set_text(format_seconds((status.epochs - status.epoch) * per_epoch) if status.state == "training" else "—")
-        time_labels["per_epoch"].set_text(f"{per_epoch:.0f}s")
+        remaining = format_seconds((status.epochs - status.epoch) * per_epoch) if status.state == "training" else "—"
+        self.time_labels["elapsed"].set_text(format_seconds(status.elapsed))
+        self.time_labels["remaining"].set_text(remaining)
+        self.time_labels["per_epoch"].set_text(f"{per_epoch:.0f}s")
 
-        for key, (value_label, note_label) in value_labels.items():
-            best = min(log, key=lambda r: r[key]) if key.endswith("loss") else max(log, key=lambda r: r[key])
+        for key, (value_label, note_label) in self.value_labels.items():
             value_label.set_text(f"{log[-1][key]:.3f}")
 
             # the loss cards show the parts of the last epoch, the map cards the best epoch
-            parts = [f"{k.removeprefix(key + '_')} {v:.2f}" for k, v in log[-1].items() if k.startswith(key + "_")]
-            note_label.set_text(" · ".join(parts) if key.endswith("loss") else t("monitor.best", value=f"{best[key]:.3f}", epoch=int(best["epoch"])))
+            if key.endswith("loss"):
+                parts = [f"{k.removeprefix(key + '_')} {v:.2f}" for k, v in log[-1].items() if k.startswith(key + "_")]
+                note_label.set_text(" · ".join(parts))
+            else:
+                best = max(log, key=lambda r: r[key])
+                note_label.set_text(t("monitor.best", value=f"{best[key]:.3f}", epoch=int(best["epoch"])))
 
         epochs_axis = [int(r["epoch"]) for r in log]
 
         for chart_key, keys in [("loss", ["train_loss", "val_loss"]), ("map", ["map50", "map50_95"])]:
-            charts[chart_key].options["xAxis"]["data"] = epochs_axis
-            charts[chart_key].options["series"] = [{"type": "line", "name": key, "data": [round(r[key], 4) for r in log], "showSymbol": len(log) == 1, "lineStyle": {"width": 2}} for key in keys]
-            charts[chart_key].update()
-
-    initial = read()
-    show(initial)
-    watch(read, initial, show)
-    full_switch.on_value_change(lambda: show(read()))
+            chart = self.charts[chart_key]
+            chart.options["xAxis"]["data"] = epochs_axis
+            series = [{"type": "line", "name": key, "data": [round(r[key], 4) for r in log], "showSymbol": len(log) == 1, "lineStyle": {"width": 2}} for key in keys]
+            chart.options["series"] = series
+            chart.update()
 
 
 def add_results(output: OutputDirectory) -> None:
@@ -741,7 +796,8 @@ def add_results(output: OutputDirectory) -> None:
 
             report_button = ui.button(t("action.rebuild"), icon="refresh").props("outline dense no-caps").classes("px-3")
 
-        report_label = ui.label(output.report.read_text(encoding="utf-8") if output.report.exists() else t("results.no_report")).classes("mono text-xs whitespace-pre overflow-x-auto p-5 w-full")
+        report = output.report.read_text(encoding="utf-8") if output.report.exists() else t("results.no_report")
+        report_label = ui.label(report).classes("mono text-xs whitespace-pre overflow-x-auto p-5 w-full")
 
     async def rebuild_report() -> None:
         report_button.props("loading")
@@ -756,7 +812,8 @@ def show_image(path: Path) -> None:
     """Show an image of runs/, with its modification time in the url so that a redrawn image replaces the cached one."""
     if path.exists():
         # a plain img keeps the height of the image, where ui.image keeps a fixed ratio
-        ui.element("img").props(f'src="/runs/{path.relative_to("runs").as_posix()}?v={path.stat().st_mtime_ns}"').classes("w-full rounded-lg img-frame")
+        source = f"/runs/{path.relative_to(RUNS_DIR).as_posix()}?v={path.stat().st_mtime_ns}"
+        ui.element("img").props(f'src="{source}"').classes("w-full rounded-lg img-frame")
     else:
         with ui.column().classes("w-full h-48 items-center justify-center rounded-lg empty-frame"):
             ui.label(t("predict.no_images")).classes("text-sm faint")
@@ -784,7 +841,8 @@ def add_predict(output: OutputDirectory, devices: list[tuple[str, str]]) -> None
 
         num_images = ui.number(t("predict.num_images"), value=PREDICT_CONFIG["num_images"], min=1, step=1, format="%d").props("dense outlined").classes("w-28")
         seed = ui.number(t("predict.seed"), value=PREDICT_CONFIG["seed"], step=1, format="%d").props("dense outlined").classes("w-24")
-        device_select = ui.select({name: f"{name}  {description}" for name, description in devices if name in free}, value=free[0] if free else None, label=t("predict.device")).props("dense outlined").classes("w-80")
+        device_options = {name: f"{name}  {description}" for name, description in devices if name in free}
+        device_select = ui.select(device_options, value=free[0] if free else None, label=t("predict.device")).props("dense outlined").classes("w-80")
 
     if not free:
         with ui.row().classes("w-full items-center gap-2 px-4 py-3 rounded-lg banner-warn"):
@@ -869,40 +927,119 @@ def add_predict(output: OutputDirectory, devices: list[tuple[str, str]]) -> None
             upload = ui.upload(label=t("predict.upload"), auto_upload=True, on_upload=predict_upload).props("accept=image/* flat bordered color=grey-8").classes("w-72 order-first")
 
 
+# onnx export
+def add_export(output: OutputDirectory) -> None:
+    """Add the onnx export of a best weights file, and the verify and inference of an exported file on an uploaded image."""
+    weights = [name for name in PREDICT_CONFIG["weights"] if (output.path / name).exists()]
+
+    if not weights:
+        with ui.column().classes("card w-full p-5"):
+            ui.label(t("predict.no_weights")).classes("text-sm muted")
+
+        return
+
+    width, height = read_config(output.config)["common"]["image_size"]
+
+    with ui.column().classes("card w-full gap-0"):
+        with ui.row().classes("card-head w-full"):
+            with ui.column().classes("gap-0"):
+                ui.label(t("export.title")).classes("section-title")
+                ui.label(t("export.hint")).classes("caption")
+
+        with ui.row().classes("w-full p-4 items-end gap-5"):
+            weights_select = ui.select(weights, value=weights[-1], label=t("export.weights")).props("dense outlined").classes("w-40")
+            size_mode = ui.toggle({"fixed": t("export.fixed"), "dynamic": t("export.dynamic")}, value="fixed").props("dense no-caps unelevated toggle-color=primary")
+            width_input = ui.number(t("export.width"), value=width, min=32, step=32, format="%d").props("dense outlined").classes("w-24")
+            height_input = ui.number(t("export.height"), value=height, min=32, step=32, format="%d").props("dense outlined").classes("w-24")
+            opset_input = ui.number("opset", value=19, min=16, step=1, format="%d").props("dense outlined").classes("w-24")
+            simplify_box = ui.checkbox(t("export.simplify")).props("dense")
+            export_button = ui.button(t("action.export"), icon="file_download").props("unelevated dense no-caps").classes("px-3")
+
+        export_log = ui.label().classes("console mono w-full")
+        export_log.set_visibility(False)
+
+    size_mode.on_value_change(lambda e: (width_input.set_enabled(e.value == "fixed"), height_input.set_enabled(e.value == "fixed")))
+
+    with ui.column().classes("card w-full gap-0"):
+        with ui.row().classes("card-head w-full"):
+            with ui.column().classes("gap-0"):
+                ui.label(t("export.files")).classes("section-title")
+                ui.label(t("export.files_hint")).classes("caption")
+
+        with ui.row().classes("w-full p-4 items-start gap-5"):
+            files = {str(path): path.name for path in sorted(output.export.glob("*.onnx"))}
+            file_select = ui.select(files, value=next(iter(files), None), label=t("export.file")).props("dense outlined").classes("w-80")
+            tool_toggle = ui.toggle({"verify": t("export.verify"), "inference": t("export.inference")}, value="verify").props("dense no-caps unelevated toggle-color=primary")
+            upload_dir = Path(tempfile.mkdtemp(prefix="mydets_upload_"))
+            upload = ui.upload(label=t("export.upload"), auto_upload=True).props("accept=image/* flat bordered color=grey-8").classes("w-72")
+
+        result = ui.column().classes("w-full gap-3 px-5 pb-5")
+
+    async def export() -> None:
+        image_size = (int(width_input.value), int(height_input.value)) if size_mode.value == "fixed" else None
+        export_button.props("loading")
+        succeeded, text = await run.io_bound(export_onnx, output.path, weights_select.value, image_size, int(opset_input.value), simplify_box.value)
+        export_button.props(remove="loading")
+        export_log.set_text(text)
+        export_log.set_visibility(True)
+        ui.notify(t("notify.exported") if succeeded else t("notify.export_failed"), type="positive" if succeeded else "negative")
+        exported = {str(path): path.name for path in sorted(output.export.glob("*.onnx"))}
+        file_select.set_options(exported, value=file_select.value or next(iter(exported), None))
+
+    async def run_tool(event: object) -> None:
+        if file_select.value is None:
+            ui.notify(t("export.choose_file"), type="warning")
+            upload.reset()
+            return
+
+        image_path = upload_dir / event.file.name
+        await event.file.save(image_path)
+        succeeded, text, saved = await run.io_bound(run_onnx_tool, tool_toggle.value, output.path, Path(file_select.value), image_path)
+        upload.reset()
+        result.clear()
+
+        with result:
+            if succeeded or saved.exists():
+                show_image(saved)
+
+            ui.label(text).classes("mono text-xs whitespace-pre overflow-x-auto w-full")
+
+    export_button.on_click(export)
+    upload.on_upload(run_tool)
+
+
 # configs
-def add_configs_page(devices: list[tuple[str, str]]) -> None:
-    """Add the page of the user configs and the presets, where new configs are made from a copy."""
-    @ui.page("/configs")
-    def configs_page() -> None:
-        add_frame(devices, "/configs")
-        entries = list_configs()
+@ui.page("/configs")
+def configs_page() -> None:
+    """Show the user configs and the presets, where new configs are made from a copy."""
+    add_frame(list_devices(), "/configs")
+    entries = list_configs()
+    mine = [e for e in entries if not e.preset]
 
-        with ui.column().classes("w-full max-w-[1280px] px-8 py-7 gap-5"):
-            with add_page_title(t("configs.title"), t("configs.subtitle")):
-                ui.button(t("action.new_config"), icon="add", on_click=lambda: open_new_config_dialog(entries, None)).props("unelevated no-caps")
+    with ui.column().classes("w-full max-w-[1280px] px-8 py-7 gap-5"):
+        with add_page_title(t("configs.title"), t("configs.subtitle")):
+            ui.button(t("action.new_config"), icon="add", on_click=lambda: open_new_config_dialog(entries, None)).props("unelevated no-caps")
 
-            mine = [e for e in entries if not e.preset]
+        with ui.column().classes("card w-full gap-0"):
+            with ui.row().classes("card-head w-full items-baseline gap-2"):
+                ui.label(t("configs.mine")).classes("section-title")
+                ui.label("configs/user/").classes("caption mono")
 
-            with ui.column().classes("card w-full gap-0"):
-                with ui.row().classes("card-head w-full items-baseline gap-2"):
-                    ui.label(t("configs.mine")).classes("section-title")
-                    ui.label("configs/user/").classes("caption mono")
+            if not mine:
+                with ui.column().classes("w-full items-center gap-2 py-10"):
+                    ui.label(t("configs.empty")).classes("text-sm muted")
+                    ui.button(t("action.new_config"), icon="add", on_click=lambda: open_new_config_dialog(entries, None)).props("outline no-caps")
 
-                if not mine:
-                    with ui.column().classes("w-full items-center gap-2 py-10"):
-                        ui.label(t("configs.empty")).classes("text-sm muted")
-                        ui.button(t("action.new_config"), icon="add", on_click=lambda: open_new_config_dialog(entries, None)).props("outline no-caps")
+            for entry in mine:
+                add_config_row(entry, entries)
 
-                for entry in mine:
-                    add_config_row(entry, entries)
+        with ui.column().classes("card w-full gap-0"):
+            with ui.row().classes("card-head w-full items-baseline gap-2"):
+                ui.label(t("configs.presets")).classes("section-title")
+                ui.label(f"configs/ · {t('configs.readonly')}").classes("caption mono")
 
-            with ui.column().classes("card w-full gap-0"):
-                with ui.row().classes("card-head w-full items-baseline gap-2"):
-                    ui.label(t("configs.presets")).classes("section-title")
-                    ui.label(f"configs/ · {t('configs.readonly')}").classes("caption mono")
-
-                for entry in [e for e in entries if e.preset]:
-                    add_config_row(entry, entries)
+            for entry in [e for e in entries if e.preset]:
+                add_config_row(entry, entries)
 
 
 def add_config_row(entry: ConfigEntry, entries: list[ConfigEntry]) -> None:
@@ -924,8 +1061,20 @@ def add_config_row(entry: ConfigEntry, entries: list[ConfigEntry]) -> None:
             add_pill(t("configs.editable"), "tag-blue")
 
         with ui.row().classes("gap-1 no-wrap").on("click.stop", lambda: None):
-            ui.button(t("action.view") if entry.locked else t("action.edit"), on_click=lambda: ui.navigate.to(f"/configs/{entry.name}")).props("flat dense no-caps").classes("px-2")
+            open_label = t("action.view") if entry.locked else t("action.edit")
+            ui.button(open_label, on_click=lambda: ui.navigate.to(f"/configs/{entry.name}")).props("flat dense no-caps").classes("px-2")
             ui.button(t("action.copy"), on_click=lambda: open_new_config_dialog(entries, entry)).props("flat dense no-caps").classes("px-2")
+
+
+def describe_name_problem(value: str) -> str | None:
+    """Return the problem of a new config name in the current language, None when it is fine or empty."""
+    problem = check_name(value) if value else None
+    return t(problem) if problem else None
+
+
+def describe_new_paths(value: str) -> str:
+    """Return the config file and the output directory that a new config name makes."""
+    return f"configs/user/{value}.yaml → runs/{value}/" if value else ""
 
 
 def open_new_config_dialog(entries: list[ConfigEntry], base: ConfigEntry | None) -> None:
@@ -940,8 +1089,8 @@ def open_new_config_dialog(entries: list[ConfigEntry], base: ConfigEntry | None)
             options = {str(e.path): e.name + (f"  ({t('configs.preset')})" if e.preset else "") for e in entries}
             default = base or next((e for e in entries if e.preset), None)
             base_select = ui.select(options, value=str(default.path) if default else None, label=t("configs.base")).props("outlined dense").classes("w-full")
-            name_input = ui.input(t("configs.name"), validation=lambda value: t(check_name(value)) if value and check_name(value) else None).props("outlined dense").classes("w-full")
-            ui.label().bind_text_from(name_input, "value", backward=lambda value: f"configs/user/{value}.yaml → runs/{value}/" if value else "").classes("text-xs mono muted")
+            name_input = ui.input(t("configs.name"), validation=describe_name_problem).props("outlined dense").classes("w-full")
+            ui.label().bind_text_from(name_input, "value", backward=describe_new_paths).classes("text-xs mono muted")
 
         def create() -> None:
             problem = check_name(name_input.value or "")
@@ -963,162 +1112,191 @@ def open_new_config_dialog(entries: list[ConfigEntry], base: ConfigEntry | None)
 
 
 # config editor
-def add_editor_page(devices: list[tuple[str, str]]) -> None:
-    """Add the page that builds a config with blocks and fields made from the code, or edits it as text."""
-    @ui.page("/configs/{name}")
-    def editor_page(name: str) -> None:
-        add_frame(devices, "/configs")
-        entry = find_config(name)
+@ui.page("/configs/{name}")
+def editor_page(name: str) -> None:
+    """Build a config with blocks and fields made from the code, or edit it as text."""
+    devices = list_devices()
+    add_frame(devices, "/configs")
+    entry = find_config(name)
 
-        with ui.column().classes("w-full max-w-[1400px] px-8 py-7 gap-4"):
-            ui.link(t("action.back_configs"), "/configs").classes("text-sm muted no-underline")
+    with ui.column().classes("w-full max-w-[1400px] px-8 py-7 gap-4"):
+        ui.link(t("action.back_configs"), "/configs").classes("text-sm muted no-underline")
 
-            if entry is None:
-                ui.label(t("configs.missing", name=name)).classes("muted")
+        if entry is None:
+            ui.label(t("configs.missing", name=name)).classes("muted")
+            return
+
+        ConfigEditor(entry, devices)
+
+
+class ConfigEditor:
+    """Form and text editor of one config, with its preview, save and start buttons."""
+
+    def __init__(self, entry: ConfigEntry, devices: list[tuple[str, str]]) -> None:
+        """Add the editor of a config.
+
+        Args:
+            entry: config to edit, read only when it is a preset or trained.
+            devices: (name, description) of every device, for the start dialog.
+        """
+        self.entry = entry
+        self.devices = devices
+        self.config = load_config(entry.path)
+        self.readonly = entry.locked
+        self.dirty = False
+        self.add_header()
+
+        if self.readonly:
+            locked = t("editor.locked_preset") if entry.preset else t("editor.locked_trained")
+
+            with ui.row().classes("w-full items-center gap-2 px-4 py-3 rounded-lg banner-warn"):
+                ui.icon("lock", size="18px")
+                ui.label(locked).classes("text-sm")
+
+        self.errors = ui.column().classes("w-full gap-1")
+        text_theme = "basicDark" if get_theme()[0] == "dark" else "basicLight"
+
+        with ui.row().classes("w-full gap-5 items-start no-wrap"):
+            self.form = ui.column().classes("flex-1 gap-4 min-w-0")
+            self.text = ui.codemirror(write_config(self.config), language="YAML", theme=text_theme).classes("flex-1 min-w-0 card overflow-hidden")
+            self.text.set_visibility(False)
+
+            if self.readonly:
+                self.text.props("disable")
+
+            with ui.column().classes("card w-[400px] gap-0 sticky top-4") as self.preview_card:
+                with ui.column().classes("card-head w-full gap-0"):
+                    ui.label(t("editor.preview")).classes("section-title")
+                    ui.label(t("editor.preview_hint")).classes("caption")
+
+                self.preview = ui.code(write_config(self.config), language="yaml").classes("w-full text-xs max-h-[75vh] overflow-y-auto").style("border-radius:0 0 12px 12px")
+
+        self.mode.on_value_change(self.switch_mode)
+
+        if not self.readonly:
+            self.text.on_value_change(self.mark_text_changed)
+            self.save_button.on_click(self.save)
+
+        if not is_trained(entry):
+            self.start_button.on_click(self.start)
+
+        self.build_form()
+
+    def add_header(self) -> None:
+        """Add the name, the state pills, the path and the buttons of the config."""
+        entry = self.entry
+
+        with ui.row().classes("w-full items-start justify-between no-wrap"):
+            with ui.column().classes("gap-1"):
+                with ui.row().classes("items-center gap-3"):
+                    ui.label(entry.name).classes("text-2xl font-bold")
+
+                    if entry.preset:
+                        add_pill(t("configs.preset"), "tag-grey")
+                    elif self.readonly:
+                        add_pill(t("configs.trained"), "tag-orange")
+                    else:
+                        add_pill(t("configs.editable"), "tag-blue")
+
+                    with ui.row() as self.unsaved:
+                        add_pill(t("editor.unsaved"), "tag-orange")
+
+                    self.unsaved.set_visibility(False)
+
+                ui.label(entry.path.as_posix()).classes("text-xs mono muted")
+
+            with ui.row().classes("items-center gap-2 no-wrap"):
+                self.mode = ui.toggle({"form": t("editor.form"), "text": t("editor.text")}, value="form").props("no-caps dense unelevated toggle-color=primary")
+
+                if self.readonly:
+                    ui.button(t("action.copy_new"), icon="content_copy", on_click=lambda: open_new_config_dialog(list_configs(), entry)).props("outline no-caps")
+                else:
+                    ui.button(t("action.revert"), on_click=ui.navigate.reload).props("outline no-caps")
+                    self.save_button = ui.button(t("action.save"), icon="save").props("outline no-caps")
+
+                # a preset can be trained as it is, a trained config only through a copy
+                if not is_trained(entry):
+                    self.start_button = ui.button(t("action.start_training"), icon="play_arrow").props("unelevated no-caps")
+
+    def mark_changed(self) -> None:
+        """Show the unsaved pill and the new preview after a change in the form."""
+        self.mark_text_changed()
+        self.preview.set_content(write_config(self.config))
+
+    def mark_text_changed(self) -> None:
+        """Show the unsaved pill after a change in the text."""
+        self.dirty = True
+        self.unsaved.set_visibility(True)
+
+    def build_form(self) -> None:
+        """Draw the form of the config again."""
+        self.form.clear()
+
+        with self.form:
+            add_config_form(self.config, self.readonly, self.mark_changed)
+
+    def switch_mode(self, event: object) -> None:
+        """Switch between the form and the text, carrying the changes over."""
+        if event.value == "text":
+            self.text.set_value(write_config(self.config))
+        else:
+            parsed = parse_text(self.text.value)
+
+            if parsed is None:
+                self.mode.set_value("text")
                 return
 
-            config = load_config(entry.path)
-            readonly = entry.locked
-            state = {"dirty": False}
+            self.config = parsed
+            self.build_form()
+            self.preview.set_content(write_config(self.config))
 
-            with ui.row().classes("w-full items-start justify-between no-wrap"):
-                with ui.column().classes("gap-1"):
-                    with ui.row().classes("items-center gap-3"):
-                        ui.label(name).classes("text-2xl font-bold")
+        self.form.set_visibility(event.value == "form")
+        self.preview_card.set_visibility(event.value == "form")
+        self.text.set_visibility(event.value == "text")
 
-                        if entry.preset:
-                            add_pill(t("configs.preset"), "tag-grey")
-                        elif readonly:
-                            add_pill(t("configs.trained"), "tag-orange")
-                        else:
-                            add_pill(t("configs.editable"), "tag-blue")
+    def save(self) -> bool:
+        """Check and save the config, showing the problems instead when there are any.
 
-                        unsaved = ui.row()
+        Returns:
+            Whether the config was saved.
+        """
+        if self.mode.value == "text":
+            parsed = parse_text(self.text.value)
 
-                        with unsaved:
-                            add_pill(t("editor.unsaved"), "tag-orange")
+            if parsed is None:
+                return False
 
-                        unsaved.set_visibility(False)
+            self.config = parsed
 
-                    ui.label(entry.path.as_posix()).classes("text-xs mono muted")
+        problems = check_config(self.config)
+        self.errors.clear()
 
-                with ui.row().classes("items-center gap-2 no-wrap"):
-                    mode = ui.toggle({"form": t("editor.form"), "text": t("editor.text")}, value="form").props("no-caps dense unelevated toggle-color=primary")
+        if problems:
+            with self.errors:
+                with ui.column().classes("w-full gap-1 px-4 py-3 rounded-lg banner-bad"):
+                    ui.label(t("editor.errors")).classes("text-sm font-semibold")
 
-                    if readonly:
-                        ui.button(t("action.copy_new"), icon="content_copy", on_click=lambda: open_new_config_dialog(list_configs(), entry)).props("outline no-caps")
-                    else:
-                        ui.button(t("action.revert"), on_click=ui.navigate.reload).props("outline no-caps")
-                        save_button = ui.button(t("action.save"), icon="save").props("outline no-caps")
+                    for problem in problems:
+                        ui.label(problem).classes("text-sm mono")
 
-                    # a preset can be trained as it is, a trained config only through a copy
-                    if not is_trained(entry):
-                        start_button = ui.button(t("action.start_training"), icon="play_arrow").props("unelevated no-caps")
+            return False
 
-            if readonly:
-                with ui.row().classes("w-full items-center gap-2 px-4 py-3 rounded-lg banner-warn"):
-                    ui.icon("lock", size="18px")
-                    ui.label(t("editor.locked_preset") if entry.preset else t("editor.locked_trained")).classes("text-sm")
+        save_config(self.entry, self.config)
+        self.config = load_config(self.entry.path)
+        self.text.set_value(write_config(self.config))
+        self.preview.set_content(write_config(self.config))
+        self.build_form()
+        self.dirty = False
+        self.unsaved.set_visibility(False)
+        ui.notify(t("editor.saved"), type="positive")
+        return True
 
-            errors = ui.column().classes("w-full gap-1")
+    def start(self) -> None:
+        """Open the start dialog, saving the changes first since the training reads the file."""
+        if self.dirty and not self.save():
+            return
 
-            with ui.row().classes("w-full gap-5 items-start no-wrap"):
-                form = ui.column().classes("flex-1 gap-4 min-w-0")
-                text = ui.codemirror(write_config(config), language="YAML", theme="basicDark" if get_theme()[0] == "dark" else "basicLight").classes("flex-1 min-w-0 card overflow-hidden")
-                text.set_visibility(False)
-
-                if readonly:
-                    text.props("disable")
-
-                with ui.column().classes("card w-[400px] gap-0 sticky top-4") as preview_card:
-                    with ui.column().classes("card-head w-full gap-0"):
-                        ui.label(t("editor.preview")).classes("section-title")
-                        ui.label(t("editor.preview_hint")).classes("caption")
-
-                    preview = ui.code(write_config(config), language="yaml").classes("w-full text-xs max-h-[75vh] overflow-y-auto").style("border-radius:0 0 12px 12px")
-
-            def mark_changed() -> None:
-                state["dirty"] = True
-                unsaved.set_visibility(True)
-                preview.set_content(write_config(config))
-
-            def build_form() -> None:
-                form.clear()
-
-                with form:
-                    add_config_form(config, readonly, mark_changed)
-
-            def switch_mode(event) -> None:
-                nonlocal config
-
-                if event.value == "text":
-                    text.set_value(write_config(config))
-                else:
-                    parsed = parse_text(text.value)
-
-                    if parsed is None:
-                        mode.set_value("text")
-                        return
-
-                    config = parsed
-                    build_form()
-                    preview.set_content(write_config(config))
-
-                form.set_visibility(event.value == "form")
-                preview_card.set_visibility(event.value == "form")
-                text.set_visibility(event.value == "text")
-
-            def save() -> bool:
-                nonlocal config
-
-                if mode.value == "text":
-                    parsed = parse_text(text.value)
-
-                    if parsed is None:
-                        return False
-
-                    config = parsed
-
-                problems = check_config(config)
-                errors.clear()
-
-                if problems:
-                    with errors:
-                        with ui.column().classes("w-full gap-1 px-4 py-3 rounded-lg banner-bad"):
-                            ui.label(t("editor.errors")).classes("text-sm font-semibold")
-
-                            for problem in problems:
-                                ui.label(problem).classes("text-sm mono")
-
-                    return False
-
-                save_config(entry, config)
-                config = load_config(entry.path)
-                text.set_value(write_config(config))
-                preview.set_content(write_config(config))
-                build_form()
-                state["dirty"] = False
-                unsaved.set_visibility(False)
-                ui.notify(t("editor.saved"), type="positive")
-                return True
-
-            def start() -> None:
-                # the training reads the file, so the changes are saved first
-                if state["dirty"] and not save():
-                    return
-
-                open_add_dialog(devices, name)
-
-            mode.on_value_change(switch_mode)
-
-            if not readonly:
-                text.on_value_change(lambda: (state.update(dirty=True), unsaved.set_visibility(True)))
-                save_button.on_click(save)
-
-            if not is_trained(entry):
-                start_button.on_click(start)
-
-            build_form()
+        open_add_dialog(self.devices, self.entry.name)
 
 
 def parse_text(value: str) -> CommentedMap | None:
@@ -1140,7 +1318,7 @@ def add_section_card(section: str) -> ui.column:
         return ui.column().classes("w-full gap-4 p-5")
 
 
-def add_config_form(config: CommentedMap, readonly: bool, on_change) -> None:
+def add_config_form(config: CommentedMap, readonly: bool, on_change: Callable[[], None]) -> None:
     """Add the form of every config section, built from the settings classes and the registered classes."""
     types = list_types()
 
@@ -1154,10 +1332,10 @@ def add_config_form(config: CommentedMap, readonly: bool, on_change) -> None:
             add_fields(config, section, infos, readonly, on_change)
 
             for key in TRANSFORM_LISTS.get(section, []):
-                add_transform_list(config[section], key, types["transform"], readonly, on_change)
+                TransformList(config[section], key, types["transform"], readonly, on_change)
 
 
-def add_fields(parent: CommentedMap, key: str, infos: list[FieldInfo], readonly: bool, on_change, columns: int = 3) -> None:
+def add_fields(parent: CommentedMap, key: str, infos: list[FieldInfo], readonly: bool, on_change: Callable[[], None], columns: int = 3) -> None:
     """Add an input for each field of a mapping, which writes the value into the config on change."""
     def get_mapping() -> CommentedMap:
         if not isinstance(parent.get(key), dict):
@@ -1172,7 +1350,7 @@ def add_fields(parent: CommentedMap, key: str, infos: list[FieldInfo], readonly:
             add_field(get_mapping, info, values.get(info.name, info.default), readonly, on_change)
 
 
-def add_field(get_mapping, info: FieldInfo, value: object, readonly: bool, on_change) -> None:
+def add_field(get_mapping: Callable[[], CommentedMap], info: FieldInfo, value: object, readonly: bool, on_change: Callable[[], None]) -> None:
     """Add the input of one field, chosen by its type hint, with its type and description as a tooltip."""
     def write(new_value: object) -> None:
         get_mapping()[info.name] = convert_value(new_value, info)
@@ -1183,7 +1361,9 @@ def add_field(get_mapping, info: FieldInfo, value: object, readonly: bool, on_ch
             ui.label(info.name).classes("text-xs mono font-semibold truncate label-strong")
 
             with ui.icon("help_outline", size="15px").classes("faint cursor-help"):
-                ui.tooltip(f"{info.name}: {info.annotation}" + (f" = {info.default}" if not info.required else "") + (f"\n{info.help}" if info.help else "")).classes("whitespace-pre-line")
+                default = f" = {info.default}" if not info.required else ""
+                help_text = f"\n{info.help}" if info.help else ""
+                ui.tooltip(f"{info.name}: {info.annotation}{default}{help_text}").classes("whitespace-pre-line")
 
         if info.choices:
             element = ui.select(info.choices, value=value if value in info.choices else None, on_change=lambda e: write(e.value))
@@ -1215,7 +1395,7 @@ def convert_value(value: object, info: FieldInfo) -> object:
     return value
 
 
-def add_type_menu(registry: list[type], label: str, icon: str, on_choose, props: str) -> ui.button:
+def add_type_menu(registry: list[type], label: str, icon: str, on_choose: Callable[[str], None], props: str) -> ui.button:
     """Add a button with a menu of the registered classes and the first line of their docstrings."""
     with ui.button(label, icon=icon).props(f"{props} dense no-caps").classes("px-3 shrink-0") as button:
         with ui.menu().props("auto-close").classes("max-h-[60vh]"):
@@ -1244,7 +1424,7 @@ def make_default_args(cls: type, skipped: list[str]) -> CommentedMap:
     return args
 
 
-def add_model_block(model: CommentedMap, block_name: str, registry: list[type], readonly: bool, on_change) -> None:
+def add_model_block(model: CommentedMap, block_name: str, registry: list[type], readonly: bool, on_change: Callable[[], None]) -> None:
     """Add a backbone, neck or head block with its type, the button that changes it and the inputs of its arguments."""
     block = model[block_name]
     classes = {cls.__name__: cls for cls in registry}
@@ -1276,137 +1456,172 @@ def add_model_block(model: CommentedMap, block_name: str, registry: list[type], 
     model_block()
 
 
-def add_transform_list(section: CommentedMap, key: str, registry: list[type], readonly: bool, on_change) -> None:
-    """Add a transform list as blocks in order, with buttons to add, move and delete transforms."""
-    classes = {cls.__name__: cls for cls in registry}
+class TransformList:
+    """Transform list of a config section as blocks in order, with buttons to add, move and delete transforms."""
 
-    def get_blocks() -> CommentedSeq:
-        if not isinstance(section.get(key), list):
-            section[key] = CommentedSeq()
+    def __init__(self, section: CommentedMap, key: str, registry: list[type], readonly: bool, on_change: Callable[[], None]) -> None:
+        """Add the list.
 
-        return section[key]
+        Args:
+            section: config section that has the list.
+            key: key of the list in the section, such as transforms.
+            registry: transform classes that can be added.
+            readonly: show the list without buttons and with disabled inputs.
+            on_change: function called after any change.
+        """
+        self.section = section
+        self.key = key
+        self.registry = registry
+        self.classes = {cls.__name__: cls for cls in registry}
+        self.readonly = readonly
+        self.on_change = on_change
+        self.blocks_view = ui.refreshable(self.add_blocks)
+        self.blocks_view()
 
-    def add_block(type_name: str) -> None:
-        get_blocks().append(CommentedMap({"type": type_name, "args": make_default_args(classes[type_name], [])}))
-        transform_list.refresh()
-        on_change()
+    def get_blocks(self) -> CommentedSeq:
+        """Return the list in the config, made empty when it is missing."""
+        if not isinstance(self.section.get(self.key), list):
+            self.section[self.key] = CommentedSeq()
 
-    def move_block(index: int, offset: int) -> None:
-        blocks = get_blocks()
+        return self.section[self.key]
+
+    def add(self, type_name: str) -> None:
+        """Add a transform at the end with the defaults of its class."""
+        args = make_default_args(self.classes[type_name], [])
+        self.get_blocks().append(CommentedMap({"type": type_name, "args": args}))
+        self.changed()
+
+    def move(self, index: int, offset: int) -> None:
+        """Move a transform up or down."""
+        blocks = self.get_blocks()
 
         if 0 <= index + offset < len(blocks):
             blocks.insert(index + offset, blocks.pop(index))
-            transform_list.refresh()
-            on_change()
+            self.changed()
 
-    def delete_block(index: int) -> None:
-        get_blocks().pop(index)
-        transform_list.refresh()
-        on_change()
+    def delete(self, index: int) -> None:
+        """Delete a transform."""
+        self.get_blocks().pop(index)
+        self.changed()
 
-    @ui.refreshable
-    def transform_list() -> None:
-        blocks = section.get(key) or []
+    def changed(self) -> None:
+        """Draw the list again and report the change."""
+        self.blocks_view.refresh()
+        self.on_change()
+
+    def add_blocks(self) -> None:
+        """Add a block per transform and the tile that adds one."""
+        blocks = self.section.get(self.key) or []
 
         with ui.column().classes("w-full gap-2 pt-2").classes("divider-top"):
             with ui.row().classes("items-baseline gap-2"):
-                ui.label(key).classes("text-sm mono font-semibold")
+                ui.label(self.key).classes("text-sm mono font-semibold")
                 ui.label(t("editor.in_order", count=len(blocks))).classes("caption")
 
             for i, block in enumerate(blocks):
-                cls = classes.get(block["type"])
+                self.add_block(i, block)
 
-                with ui.column().classes("box w-full px-4 py-3 gap-2"):
-                    with ui.row().classes("w-full items-center justify-between no-wrap"):
-                        with ui.row().classes("items-center gap-3 no-wrap min-w-0"):
-                            ui.label(str(i + 1)).classes("w-6 h-6 rounded-full text-xs font-semibold flex items-center justify-center index-dot")
-                            ui.label(str(block["type"])).classes("font-semibold")
-                            ui.label(describe_type(cls) if cls else t("editor.unknown_type")).classes("text-xs muted truncate")
-
-                        if not readonly:
-                            with ui.row().classes("gap-0 no-wrap"):
-                                ui.button(icon="arrow_upward", on_click=lambda i=i: move_block(i, -1)).props("flat dense round size=sm").tooltip(t("action.move_up"))
-                                ui.button(icon="arrow_downward", on_click=lambda i=i: move_block(i, 1)).props("flat dense round size=sm").tooltip(t("action.move_down"))
-                                ui.button(icon="delete_outline", on_click=lambda i=i: delete_block(i), color="negative").props("flat dense round size=sm").tooltip(t("action.delete"))
-
-                    infos = describe_class(cls, []) if cls else []
-
-                    if infos:
-                        add_fields(block, "args", infos, readonly, on_change, columns=4)
-
-            if not readonly:
+            if not self.readonly:
                 with ui.row().classes("add-tile w-full items-center gap-2"):
                     ui.icon("add", size="20px")
                     ui.label(t("action.add_transform"))
 
                     with ui.menu().props("auto-close fit").classes("max-h-[60vh]"):
-                        for cls in registry:
-                            with ui.menu_item(on_click=lambda name=cls.__name__: add_block(name)):
+                        for cls in self.registry:
+                            with ui.menu_item(on_click=lambda name=cls.__name__: self.add(name)):
                                 with ui.column().classes("gap-0 py-1"):
                                     ui.label(cls.__name__).classes("font-semibold text-sm")
                                     ui.label(describe_type(cls)).classes("text-xs muted")
 
-    transform_list()
+    def add_block(self, index: int, block: CommentedMap) -> None:
+        """Add one transform with its buttons and the inputs of its arguments."""
+        cls = self.classes.get(block["type"])
+        description = describe_type(cls) if cls else t("editor.unknown_type")
+
+        with ui.column().classes("box w-full px-4 py-3 gap-2"):
+            with ui.row().classes("w-full items-center justify-between no-wrap"):
+                with ui.row().classes("items-center gap-3 no-wrap min-w-0"):
+                    ui.label(str(index + 1)).classes("w-6 h-6 rounded-full text-xs font-semibold flex items-center justify-center index-dot")
+                    ui.label(str(block["type"])).classes("font-semibold")
+                    ui.label(description).classes("text-xs muted truncate")
+
+                if not self.readonly:
+                    with ui.row().classes("gap-0 no-wrap"):
+                        ui.button(icon="arrow_upward", on_click=lambda: self.move(index, -1)).props("flat dense round size=sm").tooltip(t("action.move_up"))
+                        ui.button(icon="arrow_downward", on_click=lambda: self.move(index, 1)).props("flat dense round size=sm").tooltip(t("action.move_down"))
+                        ui.button(icon="delete_outline", on_click=lambda: self.delete(index), color="negative").props("flat dense round size=sm").tooltip(t("action.delete"))
+
+            infos = describe_class(cls, []) if cls else []
+
+            if infos:
+                add_fields(block, "args", infos, self.readonly, self.on_change, columns=4)
 
 
 # datasets
-def add_datasets_page(devices: list[tuple[str, str]]) -> None:
-    """Add the page of the datasets in data/, with the download button of the ones that a script can make."""
-    @ui.page("/datasets")
-    def datasets_page() -> None:
-        add_frame(devices, "/datasets")
-        shown = {"datasets": list_datasets()}
-        users = find_dataset_users()
+@ui.page("/datasets")
+def datasets_page() -> None:
+    """Show the datasets in data/, with the download button of the ones that a script can make."""
+    add_frame(list_devices(), "/datasets")
+    shown = {"datasets": list_datasets()}
+    users = find_dataset_users()
+    dataset_list = ui.refreshable(add_dataset_list)
 
-        def update(datasets: list[DatasetInfo]) -> None:
-            shown["datasets"] = datasets
-            dataset_list.refresh()
+    def update(datasets: list[DatasetInfo]) -> None:
+        shown["datasets"] = datasets
+        dataset_list.refresh()
 
-        with ui.column().classes("w-full max-w-[1280px] px-8 py-7 gap-5"):
-            add_page_title(t("datasets.title"), t("datasets.subtitle"))
+    with ui.column().classes("w-full max-w-[1280px] px-8 py-7 gap-5"):
+        add_page_title(t("datasets.title"), t("datasets.subtitle"))
+        dataset_list(shown, users, update)
+        Watcher(list_datasets, shown["datasets"], update)
 
-            @ui.refreshable
-            def dataset_list() -> None:
-                columns = "110px minmax(180px, 2fr) 80px 110px 110px minmax(160px, 2fr) 130px"
+        with ui.column().classes("card w-full gap-0"):
+            with ui.row().classes("card-head w-full items-baseline gap-3"):
+                ui.label(t("datasets.layout")).classes("section-title")
+                ui.label(t("datasets.layout_hint")).classes("caption")
 
-                with ui.column().classes("card w-full gap-0 overflow-x-auto"):
-                    with ui.grid(columns=columns).classes("w-full gap-x-4 list-head"):
-                        for key in ["status", "name", "classes", "train", "val", "used_by", "actions"]:
-                            ui.label(t(f"datasets.column.{key}"))
+            ui.label(DATASET_LAYOUT).classes("mono text-xs whitespace-pre p-5")
 
-                    if not shown["datasets"]:
-                        ui.label(t("datasets.empty")).classes("text-sm muted p-5")
 
-                    for info in shown["datasets"]:
-                        row = ui.grid(columns=columns).classes("w-full gap-x-4 items-center list-row clickable")
-                        row.on("click", lambda name=info.name: ui.navigate.to(f"/datasets/{name}"))
+def add_dataset_list(shown: dict, users: dict[str, list[str]], on_change: Callable[[list[DatasetInfo]], None]) -> None:
+    """Add a row per dataset, which opens the dataset on a click.
 
-                        with row:
-                            add_pill(t(f"datasets.state.{info.state}"), f"dataset-{info.state}")
+    Args:
+        shown: datasets on the page.
+        users: configs that train on each dataset directory, by its path.
+        on_change: function called with new datasets after a button.
+    """
+    columns = "110px minmax(180px, 2fr) 80px 110px 110px minmax(160px, 2fr) 130px"
 
-                            with ui.column().classes("gap-0 min-w-0"):
-                                ui.label(info.name).classes("font-semibold text-link truncate")
-                                ui.label(info.path.as_posix()).classes("text-xs mono muted")
+    with ui.column().classes("card w-full gap-0 overflow-x-auto"):
+        with ui.grid(columns=columns).classes("w-full gap-x-4 list-head"):
+            for key in ["status", "name", "classes", "train", "val", "used_by", "actions"]:
+                ui.label(t(f"datasets.column.{key}"))
 
-                            ui.label(str(len(info.classes)) if info.classes else "—").classes("mono")
+        if not shown["datasets"]:
+            ui.label(t("datasets.empty")).classes("text-sm muted p-5")
 
-                            for split in info.splits:
-                                ui.label(f"{split.images:,}" if split.images else "—").classes("mono")
+        for info in shown["datasets"]:
+            row = ui.grid(columns=columns).classes("w-full gap-x-4 items-center list-row clickable")
+            row.on("click", lambda name=info.name: ui.navigate.to(f"/datasets/{name}"))
+            used_by = ", ".join(users.get(info.path.as_posix(), [])) or "—"
 
-                            ui.label(", ".join(users.get(info.path.as_posix(), [])) or "—").classes("text-sm muted truncate")
+            with row:
+                add_pill(t(f"datasets.state.{info.state}"), f"dataset-{info.state}")
 
-                            with ui.row().classes("gap-1 no-wrap").on("click.stop", lambda: None):
-                                add_download_actions(info, lambda: update(list_datasets()))
+                with ui.column().classes("gap-0 min-w-0"):
+                    ui.label(info.name).classes("font-semibold text-link truncate")
+                    ui.label(info.path.as_posix()).classes("text-xs mono muted")
 
-            dataset_list()
-            watch(list_datasets, shown["datasets"], update)
+                ui.label(str(len(info.classes)) if info.classes else "—").classes("mono")
 
-            with ui.column().classes("card w-full gap-0"):
-                with ui.row().classes("card-head w-full items-baseline gap-3"):
-                    ui.label(t("datasets.layout")).classes("section-title")
-                    ui.label(t("datasets.layout_hint")).classes("caption")
+                for split in info.splits:
+                    ui.label(f"{split.images:,}" if split.images else "—").classes("mono")
 
-                ui.label(DATASET_LAYOUT).classes("mono text-xs whitespace-pre p-5")
+                ui.label(used_by).classes("text-sm muted truncate")
+
+                with ui.row().classes("gap-1 no-wrap").on("click.stop", lambda: None):
+                    add_download_actions(info, lambda: on_change(list_datasets()))
 
 
 def find_dataset_users() -> dict[str, list[str]]:
@@ -1420,7 +1635,7 @@ def find_dataset_users() -> dict[str, list[str]]:
     return users
 
 
-def add_download_actions(info: DatasetInfo, on_done) -> None:
+def add_download_actions(info: DatasetInfo, on_done: Callable[[], None]) -> None:
     """Add the download button of a dataset that a script can make and that is not ready, or the stop button of a running download."""
     if info.state == "downloading":
         def stop() -> None:
@@ -1461,67 +1676,73 @@ def make_tree(info: DatasetInfo) -> list[tuple[str, str, bool]]:
     return lines
 
 
-def add_dataset_page(devices: list[tuple[str, str]]) -> None:
-    """Add the page of one dataset: its folder tree, its classes and one drawn image of each split."""
-    @ui.page("/datasets/{name}")
-    def dataset_page(name: str) -> None:
-        add_frame(devices, "/datasets")
-        shown = {"info": read_dataset(name), "seed": 0}
+@ui.page("/datasets/{name}")
+def dataset_page(name: str) -> None:
+    """Show one dataset: its folder tree, its classes and one drawn image of each split."""
+    add_frame(list_devices(), "/datasets")
+    shown = {"info": read_dataset(name), "seed": 0}
+    content = ui.refreshable(add_dataset_content)
 
-        def update(info: DatasetInfo) -> None:
-            shown["info"] = info
-            content.refresh()
+    def update(info: DatasetInfo) -> None:
+        shown["info"] = info
+        content.refresh()
 
-        with ui.column().classes("w-full max-w-[1280px] px-8 py-7 gap-4"):
-            ui.link(t("action.back_datasets"), "/datasets").classes("text-sm muted no-underline")
+    with ui.column().classes("w-full max-w-[1280px] px-8 py-7 gap-4"):
+        ui.link(t("action.back_datasets"), "/datasets").classes("text-sm muted no-underline")
+        content(shown, update)
+        Watcher(lambda: read_dataset(name), shown["info"], update)
 
-            @ui.refreshable
-            def content() -> None:
-                info = shown["info"]
 
-                with ui.row().classes("w-full items-start justify-between no-wrap"):
-                    with ui.column().classes("gap-1"):
-                        with ui.row().classes("items-center gap-3"):
-                            ui.label(name).classes("text-2xl font-bold")
-                            add_pill(t(f"datasets.state.{info.state}"), f"dataset-{info.state}")
+def add_dataset_content(shown: dict, on_change: Callable[[DatasetInfo], None]) -> None:
+    """Add the name, state, folder tree, classes and samples of a dataset.
 
-                        ui.label(info.path.as_posix() + (f"  ·  {info.script.as_posix()}" if info.script else "")).classes("text-xs mono muted")
+    Args:
+        shown: info of the dataset on the page and the seed of the samples.
+        on_change: function called with the new info after a button.
+    """
+    info = shown["info"]
+    script = f"  ·  {info.script.as_posix()}" if info.script else ""
 
-                    with ui.row().classes("gap-2"):
-                        add_download_actions(info, lambda: update(read_dataset(name)))
+    with ui.row().classes("w-full items-start justify-between no-wrap"):
+        with ui.column().classes("gap-1"):
+            with ui.row().classes("items-center gap-3"):
+                ui.label(info.name).classes("text-2xl font-bold")
+                add_pill(t(f"datasets.state.{info.state}"), f"dataset-{info.state}")
 
-                if info.state == "downloading" or (info.path / "download.log").exists():
-                    add_download_console(info)
+            ui.label(info.path.as_posix() + script).classes("text-xs mono muted")
 
-                if info.state == "missing":
-                    return
+        with ui.row().classes("gap-2"):
+            add_download_actions(info, lambda: on_change(read_dataset(info.name)))
 
-                with ui.row().classes("w-full gap-4 items-stretch no-wrap"):
-                    with ui.column().classes("card gap-0 flex-1 min-w-0"):
-                        with ui.row().classes("card-head w-full"):
-                            ui.label(t("datasets.structure")).classes("section-title")
+    if info.state == "downloading" or (info.path / "download.log").exists():
+        add_download_console(info)
 
-                        with ui.column().classes("gap-0 p-5 mono text-sm"):
-                            for path, note, problem in make_tree(info):
-                                with ui.row().classes("gap-0 no-wrap"):
-                                    ui.label(path).classes("whitespace-pre w-48")
-                                    ui.label(note).classes(f"whitespace-pre {'text-warn' if problem else 'muted'}")
+    if info.state == "missing":
+        return
 
-                    with ui.column().classes("card gap-0 flex-1 min-w-0"):
-                        with ui.row().classes("card-head w-full"):
-                            ui.label(t("datasets.classes")).classes("section-title")
+    with ui.row().classes("w-full gap-4 items-stretch no-wrap"):
+        with ui.column().classes("card gap-0 flex-1 min-w-0"):
+            with ui.row().classes("card-head w-full"):
+                ui.label(t("datasets.structure")).classes("section-title")
 
-                        with ui.row().classes("gap-2 p-5"):
-                            for i, class_name in enumerate(info.classes or []):
-                                with ui.row().classes("pill tag-grey"):
-                                    ui.label(str(i)).classes("opacity-60 mono")
-                                    ui.label(class_name)
+            with ui.column().classes("gap-0 p-5 mono text-sm"):
+                for path, note, problem in make_tree(info):
+                    with ui.row().classes("gap-0 no-wrap"):
+                        ui.label(path).classes("whitespace-pre w-48")
+                        ui.label(note).classes(f"whitespace-pre {'text-warn' if problem else 'muted'}")
 
-                if info.state != "downloading":
-                    add_samples(info, shown)
+        with ui.column().classes("card gap-0 flex-1 min-w-0"):
+            with ui.row().classes("card-head w-full"):
+                ui.label(t("datasets.classes")).classes("section-title")
 
-            content()
-            watch(lambda: read_dataset(name), shown["info"], update)
+            with ui.row().classes("gap-2 p-5"):
+                for i, class_name in enumerate(info.classes or []):
+                    with ui.row().classes("pill tag-grey"):
+                        ui.label(str(i)).classes("opacity-60 mono")
+                        ui.label(class_name)
+
+    if info.state != "downloading":
+        add_samples(info, shown)
 
 
 def add_download_console(info: DatasetInfo) -> None:
@@ -1542,7 +1763,7 @@ def add_download_console(info: DatasetInfo) -> None:
     show(initial)
 
     if info.state == "downloading":
-        watch(lambda: read_console(log_path, CONFIG["console_tail"]), initial, show)
+        Watcher(lambda: read_console(log_path, CONFIG["console_tail"]), initial, show)
 
 
 def add_samples(info: DatasetInfo, shown: dict) -> None:
@@ -1557,51 +1778,57 @@ def add_samples(info: DatasetInfo, shown: dict) -> None:
 
         samples = ui.grid(columns=len(info.splits)).classes("w-full gap-4 p-5")
 
-    async def draw() -> None:
-        other_button.props("loading")
-        samples.clear()
-
-        for split in info.splits:
-            with samples:
-                column = ui.column().classes("gap-1 min-w-0")
-
-            # a broken label file is what this page is for, so it is shown instead of raised
-            try:
-                sample = await run.io_bound(draw_sample, info, split.name, shown["seed"])
-            except ValueError as error:
-                sample, problem = None, str(error)
-            else:
-                problem = None if sample else t("datasets.no_images")
-
-            with column:
-                ui.label(split.name).classes("caption font-semibold")
-
-                if sample:
-                    ui.element("img").props(f'src="data:image/jpeg;base64,{base64.b64encode(sample[0]).decode()}"').classes("w-full rounded-lg img-frame")
-                    ui.label(sample[1]).classes("text-xs mono muted")
-                else:
-                    with ui.column().classes("w-full h-48 items-center justify-center rounded-lg px-4 empty-frame"):
-                        ui.label(problem).classes("text-sm mono text-center text-warn")
-
-        other_button.props(remove="loading")
-
     async def draw_other() -> None:
         shown["seed"] += 1
-        await draw()
+        await draw_samples(info, shown["seed"], samples, other_button)
 
     other_button.on_click(draw_other)
-    ui.timer(0.1, draw, once=True)
+    ui.timer(0.1, lambda: draw_samples(info, shown["seed"], samples, other_button), once=True)
 
 
-def ignore_connection_reset() -> None:
+async def draw_samples(info: DatasetInfo, seed: int, samples: ui.grid, button: ui.button) -> None:
+    """Draw one image of each split with its labels into the samples grid, or the problem of its label file.
+
+    Args:
+        info: dataset to draw.
+        seed: seed of the random images.
+        samples: grid that gets a column per split.
+        button: button that shows loading while drawing.
+    """
+    button.props("loading")
+    samples.clear()
+
+    for split in info.splits:
+        with samples:
+            column = ui.column().classes("gap-1 min-w-0")
+
+        # a broken label file is what this page is for, so it is shown instead of raised
+        try:
+            sample = await run.io_bound(draw_sample, info, split.name, seed)
+        except ValueError as error:
+            sample, problem = None, str(error)
+        else:
+            problem = None if sample else t("datasets.no_images")
+
+        with column:
+            ui.label(split.name).classes("caption font-semibold")
+
+            if sample:
+                image, caption = sample
+                source = f"data:image/jpeg;base64,{base64.b64encode(image).decode()}"
+                ui.element("img").props(f'src="{source}"').classes("w-full rounded-lg img-frame")
+                ui.label(caption).classes("text-xs mono muted")
+            else:
+                with ui.column().classes("w-full h-48 items-center justify-center rounded-lg px-4 empty-frame"):
+                    ui.label(problem).classes("text-sm mono text-center text-warn")
+
+    button.props(remove="loading")
+
+
+def ignore_connection_reset(loop: asyncio.AbstractEventLoop, context: dict) -> None:
     """Keep the windows event loop from printing a traceback whenever a browser closes a connection."""
-    loop = asyncio.get_running_loop()
-
-    def handle(loop: asyncio.AbstractEventLoop, context: dict) -> None:
-        if not isinstance(context.get("exception"), ConnectionResetError):
-            loop.default_exception_handler(context)
-
-    loop.set_exception_handler(handle)
+    if not isinstance(context.get("exception"), ConnectionResetError):
+        loop.default_exception_handler(context)
 
 
 def main():
@@ -1609,15 +1836,9 @@ def main():
 
     Usage: uv run webui\\app.py
     """
-    # the device list is asked once, in a short process
-    devices = list_devices()
-    Path("runs").mkdir(exist_ok=True)
-    app.add_media_files("/runs", Path("runs"))
-    app.on_startup(ignore_connection_reset)
-
-    for add_page in [add_trainings_page, add_training_page, add_configs_page, add_editor_page, add_datasets_page, add_dataset_page]:
-        add_page(devices)
-
+    RUNS_DIR.mkdir(exist_ok=True)
+    app.add_media_files("/runs", RUNS_DIR)
+    app.on_startup(lambda: asyncio.get_running_loop().set_exception_handler(ignore_connection_reset))
     ui.run(title="MyDets", port=CONFIG["port"], storage_secret=CONFIG["storage_secret"], reload=False, show=True)
 
 
