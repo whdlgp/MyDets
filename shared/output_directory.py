@@ -6,7 +6,7 @@ from torch import Tensor
 
 
 class OutputDirectory:
-    """Files that training, prediction and the report save in the output directory of a config."""
+    """Files that training, prediction, the report and the onnx tools save in the output directory of a config."""
 
     def __init__(self, path: Path) -> None:
         """Initialize the paths.
@@ -25,6 +25,7 @@ class OutputDirectory:
         self.result = self.path / "result.json"
         self.report = self.path / "report.txt"
         self.predict = self.path / "predict"
+        self.export = self.path / "export"
         self.pid = self.path / "train.pid"
         self.console = self.path / "console.log"
 

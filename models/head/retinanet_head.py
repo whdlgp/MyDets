@@ -164,10 +164,10 @@ class RetinaNetHead(Head):
             shifts = torch.stack([shift_x, shift_y, shift_x, shift_y], -1).reshape(-1, 1, 4)
             level_anchors = (shifts + cell_anchors.to(x.device)).reshape(-1, 4)
             anchors.append(level_anchors)
-            levels.append(torch.full((len(level_anchors),), level, device=x.device))
+            levels.append(torch.full_like(level_anchors[:, 0], level, dtype=torch.long))
 
         # exact only for inputs that are multiples of the strides
-        image_size = features[0].new_tensor([features[0].shape[-1] * self.in_strides[0], features[0].shape[-2] * self.in_strides[0]])
+        image_size = (torch.stack([torch.as_tensor(features[0].shape[-1]), torch.as_tensor(features[0].shape[-2])]) * self.in_strides[0]).to(features[0])
         return {"cls_logits": torch.cat(cls_logits, 1), "box_deltas": torch.cat(box_deltas, 1), "anchors": torch.cat(anchors), "levels": torch.cat(levels), "image_size": image_size}
 
     @staticmethod

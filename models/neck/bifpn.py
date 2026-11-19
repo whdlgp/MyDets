@@ -42,7 +42,7 @@ class Resample(nn.Module):
             x = self.conv(x)
 
         if height > target_height and width > target_width:
-            return self.pool(x, (height - 1) // target_height + 1, (width - 1) // target_width + 1)
+            return self.pool(x, int((height - 1) // target_height + 1), int((width - 1) // target_width + 1))
 
         if height > target_height or width > target_width:
             raise ValueError(f"cannot resample {height}x{width} to {target_height}x{target_width}")
@@ -65,8 +65,8 @@ class Resample(nn.Module):
         """
         # "SAME" pads more at the bottom and right, and the padding never wins the max
         height, width = x.shape[-2:]
-        pad_height = max((math.ceil(height / stride_height) - 1) * stride_height + stride_height + 1 - height, 0)
-        pad_width = max((math.ceil(width / stride_width) - 1) * stride_width + stride_width + 1 - width, 0)
+        pad_height = (height + stride_height - 1) // stride_height * stride_height + 1 - height
+        pad_width = (width + stride_width - 1) // stride_width * stride_width + 1 - width
         x = F.pad(x, [pad_width // 2, pad_width - pad_width // 2, pad_height // 2, pad_height - pad_height // 2], value=-math.inf)
         return F.max_pool2d(x, (stride_height + 1, stride_width + 1), (stride_height, stride_width))
 

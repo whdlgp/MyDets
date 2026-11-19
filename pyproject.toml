@@ -1,6 +1,6 @@
 [project]
 name = "mydets"
-version = "0.4.0"
+version = "0.3.0"
 requires-python = "==3.12.*"
 dependencies = [
     "torch",
@@ -13,6 +13,9 @@ dependencies = [
     "tqdm",
     "nicegui",
     "psutil",
+    "onnx",
+    "onnxruntime",
+    "onnxsim",
 ]
 
 [tool.uv]

@@ -119,7 +119,7 @@ class YOLOXHead(Head):
             priors.append(torch.stack([grid_x, grid_y, strides], -1).reshape(-1, 3).to(x.dtype))
 
         # exact only for inputs that are multiples of the strides
-        image_size = features[0].new_tensor([features[0].shape[-1] * self.in_strides[0], features[0].shape[-2] * self.in_strides[0]])
+        image_size = (torch.stack([torch.as_tensor(features[0].shape[-1]), torch.as_tensor(features[0].shape[-2])]) * self.in_strides[0]).to(features[0])
 
         return {
             "cls_logits": torch.cat(cls_logits, 2).transpose(1, 2),

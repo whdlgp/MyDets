@@ -211,10 +211,10 @@ class TOODHead(Head):
             cls_scores.append(cls_score.flatten(2))
             boxes.append(level_boxes.flatten(2))
             anchors.append(level_anchors)
-            levels.append(torch.full((len(level_anchors),), level, device=x.device))
+            levels.append(torch.full_like(level_anchors[:, 0], level, dtype=torch.long))
 
         # exact only for inputs that are multiples of the strides
-        image_size = features[0].new_tensor([features[0].shape[-1] * self.in_strides[0], features[0].shape[-2] * self.in_strides[0]])
+        image_size = (torch.stack([torch.as_tensor(features[0].shape[-1]), torch.as_tensor(features[0].shape[-2])]) * self.in_strides[0]).to(features[0])
 
         return {
             "cls_scores": torch.cat(cls_scores, 2).transpose(1, 2),
