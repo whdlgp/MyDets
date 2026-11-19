@@ -85,6 +85,12 @@ def list_datasets() -> list[DatasetInfo]:
     return [read_dataset(name) for name in sorted(folders | set(list_scripts()))]
 
 
+def list_downloads() -> set[str]:
+    """Return the names of the datasets whose download is running, without counting their files."""
+    folders = sorted(path for path in DATA_DIR.iterdir() if path.is_dir()) if DATA_DIR.is_dir() else []
+    return {path.name for path in folders if find_process(path / "download.pid")}
+
+
 def start_download(name: str) -> None:
     """Start the download script of a dataset detached from the server, writing into data/<name>/."""
     path = DATA_DIR / name

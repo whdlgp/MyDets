@@ -188,5 +188,11 @@
   "export.upload": "Image",
   "export.choose_file": "Export a file first",
   "notify.exported": "Exported",
-  "notify.export_failed": "Export failed, see the log"
+  "notify.export_failed": "Export failed, see the log",
+  "trainings.loading": "Reading the trainings...",
+  "datasets.loading": "Reading the datasets...",
+  "predict.running": "Predicting {name}...",
+  "export.exporting": "Exporting {name}...",
+  "export.running": "Running {tool} on {name}...",
+  "action.refresh": "Refresh"
 }

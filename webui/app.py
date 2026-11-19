@@ -1,4 +1,4 @@
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 import asyncio
 import base64
@@ -20,7 +20,7 @@ from predict import CONFIG as PREDICT_CONFIG
 from shared.output_directory import OutputDirectory
 from shared.settings import CommonSettings, PredictSettings, TrainSettings, read_config
 from webui.configs import ConfigEntry, check_config, check_name, create_config, create_yaml, find_config, list_configs, load_config, save_config, write_config
-from webui.datasets import DatasetInfo, draw_sample, list_datasets, read_dataset, start_download, stop_download
+from webui.datasets import DatasetInfo, draw_sample, list_datasets, list_downloads, read_dataset, start_download, stop_download
 from webui.processes import RUNS_DIR, TrainStatus, export_onnx, find_process, list_busy_devices, list_devices, list_statuses, make_report, predict_images, read_console, read_log, read_status, run_onnx_tool, start_train, stop_process
 from webui.schema import CONNECTING_ARGS, FieldInfo, describe_class, describe_settings, list_types
 from webui.texts import TEXTS, get_language, t
@@ -132,13 +132,13 @@ class Watcher:
     Reading files and processes off the event loop keeps clicks responsive, and drawing only on a change keeps buttons from being replaced under the pointer.
     """
 
-    def __init__(self, read: Callable[[], object], initial: object, on_change: Callable[[object], None]) -> None:
+    def __init__(self, read: Callable[[], object], initial: object, on_change: Callable[[object], object]) -> None:
         """Start reading.
 
         Args:
             read: function that returns the value.
             initial: value already drawn.
-            on_change: function called with the new value.
+            on_change: function called with the new value, awaited when it is async.
         """
         self.read = read
         self.last = initial
@@ -151,7 +151,10 @@ class Watcher:
 
         if value != self.last:
             self.last = value
-            self.on_change(value)
+            result = self.on_change(value)
+
+            if inspect.isawaitable(result):
+                await result
 
 
 def add_frame(devices: list[tuple[str, str]], current: str) -> None:
@@ -269,6 +272,15 @@ def add_page_title(title: str, subtitle: str) -> ui.row:
         return ui.row().classes("items-center gap-2 no-wrap")
 
 
+def add_busy(text: str) -> ui.row:
+    """Add a spinner with what is running, returning its row to remove when the job ends."""
+    with ui.row().classes("items-center gap-2 text-sm muted py-2") as row:
+        ui.spinner(size="sm")
+        ui.label(text)
+
+    return row
+
+
 def add_pill(text: str, style: str) -> None:
     """Add a small rounded label, with a dot for the training states."""
     with ui.row().classes(f"pill {style}"):
@@ -352,11 +364,10 @@ def add_train_actions(status: TrainStatus, devices: list[tuple[str, str]], on_do
 
 # trainings
 @ui.page("/")
-def trainings_page() -> None:
+async def trainings_page() -> None:
     """Show every training in runs/, with the button that adds a new one."""
     devices = list_devices()
     add_frame(devices, "/")
-    shown = {"state": "all", "statuses": list_statuses()}
     training_list = ui.refreshable(add_training_list)
 
     def update(statuses: list[TrainStatus]) -> None:
@@ -367,6 +378,17 @@ def trainings_page() -> None:
         with add_page_title(t("trainings.title"), t("trainings.subtitle")):
             ui.button(t("action.add"), icon="add", on_click=lambda: open_add_dialog(devices)).props("unelevated no-caps")
 
+        list_area = ui.column().classes("w-full gap-5")
+
+    # the page shows at once, and the statuses fill it after they are read
+    with list_area:
+        busy = add_busy(t("trainings.loading"))
+
+    await ui.context.client.connected()
+    shown = {"state": "all", "statuses": await run.io_bound(list_statuses)}
+    busy.delete()
+
+    with list_area:
         training_list(shown, devices, update)
         Watcher(list_statuses, shown["statuses"], update)
 
@@ -911,10 +933,17 @@ def add_predict(output: OutputDirectory, devices: list[tuple[str, str]]) -> None
             upload_dir = Path(tempfile.mkdtemp(prefix="mydets_upload_"))
             single_images = ui.row().classes("flex-1 gap-4")
 
-            async def predict_upload(event) -> None:
+            async def predict_upload(event: object) -> None:
                 input_path = upload_dir / event.file.name
                 await event.file.save(input_path)
+                single_images.clear()
+
+                with single_images:
+                    add_busy(t("predict.running", name=event.file.name))
+
+                upload.disable()
                 saved = await draw(input_path, upload)
+                upload.enable()
                 upload.reset()
                 single_images.clear()
 
@@ -940,7 +969,7 @@ def add_export(output: OutputDirectory) -> None:
 
     width, height = read_config(output.config)["common"]["image_size"]
 
-    with ui.column().classes("card w-full gap-0"):
+    with ui.column().classes("card w-full gap-0") as export_card:
         with ui.row().classes("card-head w-full"):
             with ui.column().classes("gap-0"):
                 ui.label(t("export.title")).classes("section-title")
@@ -978,7 +1007,13 @@ def add_export(output: OutputDirectory) -> None:
     async def export() -> None:
         image_size = (int(width_input.value), int(height_input.value)) if size_mode.value == "fixed" else None
         export_button.props("loading")
+        export_log.set_visibility(False)
+
+        with export_card:
+            busy = add_busy(t("export.exporting", name=weights_select.value))
+
         succeeded, text = await run.io_bound(export_onnx, output.path, weights_select.value, image_size, int(opset_input.value), simplify_box.value)
+        busy.delete()
         export_button.props(remove="loading")
         export_log.set_text(text)
         export_log.set_visibility(True)
@@ -994,7 +1029,14 @@ def add_export(output: OutputDirectory) -> None:
 
         image_path = upload_dir / event.file.name
         await event.file.save(image_path)
+        result.clear()
+
+        with result:
+            add_busy(t("export.running", tool=tool_toggle.value, name=event.file.name))
+
+        upload.disable()
         succeeded, text, saved = await run.io_bound(run_onnx_tool, tool_toggle.value, output.path, Path(file_select.value), image_path)
+        upload.enable()
         upload.reset()
         result.clear()
 
@@ -1559,21 +1601,29 @@ class TransformList:
 
 # datasets
 @ui.page("/datasets")
-def datasets_page() -> None:
+async def datasets_page() -> None:
     """Show the datasets in data/, with the download button of the ones that a script can make."""
     add_frame(list_devices(), "/datasets")
-    shown = {"datasets": list_datasets()}
-    users = find_dataset_users()
-    dataset_list = ui.refreshable(add_dataset_list)
 
-    def update(datasets: list[DatasetInfo]) -> None:
-        shown["datasets"] = datasets
-        dataset_list.refresh()
+    # counting the files of a large dataset takes a while, so it is done on opening, on the button and after a download
+    async def reload() -> None:
+        list_area.clear()
 
-    with ui.column().classes("w-full max-w-[1280px] px-8 py-7 gap-5"):
-        add_page_title(t("datasets.title"), t("datasets.subtitle"))
-        dataset_list(shown, users, update)
-        Watcher(list_datasets, shown["datasets"], update)
+        with list_area:
+            add_busy(t("datasets.loading"))
+
+        datasets = await run.io_bound(list_datasets)
+        users = await run.io_bound(find_dataset_users)
+        list_area.clear()
+
+        with list_area:
+            add_dataset_list(datasets, users, reload)
+
+    with ui.column().classes("w-full max-w-[1280px] px-8 py-7 gap-5") as page:
+        with add_page_title(t("datasets.title"), t("datasets.subtitle")):
+            ui.button(t("action.refresh"), icon="refresh", on_click=reload).props("outline no-caps")
+
+        list_area = ui.column().classes("w-full")
 
         with ui.column().classes("card w-full gap-0"):
             with ui.row().classes("card-head w-full items-baseline gap-3"):
@@ -1582,14 +1632,21 @@ def datasets_page() -> None:
 
             ui.label(DATASET_LAYOUT).classes("mono text-xs whitespace-pre p-5")
 
+    await ui.context.client.connected()
+    await reload()
 
-def add_dataset_list(shown: dict, users: dict[str, list[str]], on_change: Callable[[list[DatasetInfo]], None]) -> None:
+    # only the running downloads are checked every refresh, and a finished one reads the datasets again
+    with page:
+        Watcher(list_downloads, await run.io_bound(list_downloads), lambda _: reload())
+
+
+def add_dataset_list(datasets: list[DatasetInfo], users: dict[str, list[str]], reload: Callable[[], Awaitable[None]]) -> None:
     """Add a row per dataset, which opens the dataset on a click.
 
     Args:
-        shown: datasets on the page.
+        datasets: datasets to show.
         users: configs that train on each dataset directory, by its path.
-        on_change: function called with new datasets after a button.
+        reload: function that reads the datasets again, after a download button.
     """
     columns = "110px minmax(180px, 2fr) 80px 110px 110px minmax(160px, 2fr) 130px"
 
@@ -1598,10 +1655,10 @@ def add_dataset_list(shown: dict, users: dict[str, list[str]], on_change: Callab
             for key in ["status", "name", "classes", "train", "val", "used_by", "actions"]:
                 ui.label(t(f"datasets.column.{key}"))
 
-        if not shown["datasets"]:
+        if not datasets:
             ui.label(t("datasets.empty")).classes("text-sm muted p-5")
 
-        for info in shown["datasets"]:
+        for info in datasets:
             row = ui.grid(columns=columns).classes("w-full gap-x-4 items-center list-row clickable")
             row.on("click", lambda name=info.name: ui.navigate.to(f"/datasets/{name}"))
             used_by = ", ".join(users.get(info.path.as_posix(), [])) or "—"
@@ -1621,7 +1678,7 @@ def add_dataset_list(shown: dict, users: dict[str, list[str]], on_change: Callab
                 ui.label(used_by).classes("text-sm muted truncate")
 
                 with ui.row().classes("gap-1 no-wrap").on("click.stop", lambda: None):
-                    add_download_actions(info, lambda: on_change(list_datasets()))
+                    add_download_actions(info, reload)
 
 
 def find_dataset_users() -> dict[str, list[str]]:
@@ -1635,19 +1692,19 @@ def find_dataset_users() -> dict[str, list[str]]:
     return users
 
 
-def add_download_actions(info: DatasetInfo, on_done: Callable[[], None]) -> None:
+def add_download_actions(info: DatasetInfo, on_done: Callable[[], Awaitable[None]]) -> None:
     """Add the download button of a dataset that a script can make and that is not ready, or the stop button of a running download."""
     if info.state == "downloading":
-        def stop() -> None:
+        async def stop() -> None:
             stop_download(info.name)
-            on_done()
+            await on_done()
 
         ui.button(t("action.stop"), icon="stop", on_click=stop, color="negative").props("flat dense no-caps").classes("px-3")
     elif info.script is not None and info.state != "ready":
-        def download() -> None:
+        async def download() -> None:
             start_download(info.name)
             ui.notify(t("notify.download_started", name=info.name), type="positive")
-            on_done()
+            await on_done()
 
         ui.button(t("action.download"), icon="download", on_click=download).props("flat dense no-caps").classes("px-3")
 
@@ -1677,30 +1734,46 @@ def make_tree(info: DatasetInfo) -> list[tuple[str, str, bool]]:
 
 
 @ui.page("/datasets/{name}")
-def dataset_page(name: str) -> None:
+async def dataset_page(name: str) -> None:
     """Show one dataset: its folder tree, its classes and one drawn image of each split."""
     add_frame(list_devices(), "/datasets")
-    shown = {"info": read_dataset(name), "seed": 0}
-    content = ui.refreshable(add_dataset_content)
+    shown = {"seed": 0}
 
-    def update(info: DatasetInfo) -> None:
-        shown["info"] = info
-        content.refresh()
+    # the files are counted on opening, on the button and after a download, as on the datasets page
+    async def reload() -> None:
+        content_area.clear()
 
-    with ui.column().classes("w-full max-w-[1280px] px-8 py-7 gap-4"):
-        ui.link(t("action.back_datasets"), "/datasets").classes("text-sm muted no-underline")
-        content(shown, update)
-        Watcher(lambda: read_dataset(name), shown["info"], update)
+        with content_area:
+            add_busy(t("datasets.loading"))
+
+        info = await run.io_bound(read_dataset, name)
+        content_area.clear()
+
+        with content_area:
+            add_dataset_content(info, shown, reload)
+
+    with ui.column().classes("w-full max-w-[1280px] px-8 py-7 gap-4") as page:
+        with ui.row().classes("w-full items-center justify-between"):
+            ui.link(t("action.back_datasets"), "/datasets").classes("text-sm muted no-underline")
+            ui.button(t("action.refresh"), icon="refresh", on_click=reload).props("outline dense no-caps").classes("px-3")
+
+        content_area = ui.column().classes("w-full gap-4")
+
+    await ui.context.client.connected()
+    await reload()
+
+    with page:
+        Watcher(lambda: name in list_downloads(), name in await run.io_bound(list_downloads), lambda _: reload())
 
 
-def add_dataset_content(shown: dict, on_change: Callable[[DatasetInfo], None]) -> None:
+def add_dataset_content(info: DatasetInfo, shown: dict, reload: Callable[[], Awaitable[None]]) -> None:
     """Add the name, state, folder tree, classes and samples of a dataset.
 
     Args:
-        shown: info of the dataset on the page and the seed of the samples.
-        on_change: function called with the new info after a button.
+        info: dataset to show.
+        shown: seed of the samples, kept between reloads.
+        reload: function that reads the dataset again, after a download button.
     """
-    info = shown["info"]
     script = f"  ·  {info.script.as_posix()}" if info.script else ""
 
     with ui.row().classes("w-full items-start justify-between no-wrap"):
@@ -1712,7 +1785,7 @@ def add_dataset_content(shown: dict, on_change: Callable[[DatasetInfo], None]) -
             ui.label(info.path.as_posix() + script).classes("text-xs mono muted")
 
         with ui.row().classes("gap-2"):
-            add_download_actions(info, lambda: on_change(read_dataset(info.name)))
+            add_download_actions(info, reload)
 
     if info.state == "downloading" or (info.path / "download.log").exists():
         add_download_console(info)

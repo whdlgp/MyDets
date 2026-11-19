@@ -188,5 +188,11 @@
   "export.upload": "이미지",
   "export.choose_file": "먼저 export하세요",
   "notify.exported": "export 완료",
-  "notify.export_failed": "export 실패, 로그를 확인하세요"
+  "notify.export_failed": "export 실패, 로그를 확인하세요",
+  "trainings.loading": "학습 목록을 읽는 중...",
+  "datasets.loading": "데이터셋을 읽는 중...",
+  "predict.running": "{name} 예측 중...",
+  "export.exporting": "{name} export 중...",
+  "export.running": "{name}에 {tool} 실행 중...",
+  "action.refresh": "새로고침"
 }
