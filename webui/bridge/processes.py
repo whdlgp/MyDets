@@ -4,6 +4,7 @@ from pathlib import Path
 import csv
 import json
 import os
+import re
 import subprocess
 import sys
 
@@ -187,6 +188,17 @@ def read_console(console_path: Path, num_lines: int) -> list[str]:
     lines = [line.split("\r")[-1] for line in text.replace("\r\n", "\n").split("\n")]
 
     return [line for line in lines if line.strip()][-num_lines:]
+
+
+def parse_step(lines: list[str]) -> tuple[int, int] | None:
+    """Find the step and the steps of the last train progress bar in the console lines."""
+    for line in reversed(lines):
+        match = re.search(r"train:.*?(\d+)/(\d+) \[", line)
+
+        if match:
+            return int(match[1]), int(match[2])
+
+    return None
 
 
 def predict_images(output_dir: Path, input_path: Path, weights: list[str], num_images: int, seed: int, device: str) -> list[Path]:

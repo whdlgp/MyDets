@@ -5,7 +5,7 @@ import random
 import cv2
 
 from datatools.loader import IMAGE_SUFFIXES
-from webui.processes import find_process, start_process, stop_process
+from webui.bridge.processes import find_process, start_process, stop_process
 
 DATA_DIR = Path("data")
 SCRIPT_DIR = Path("datatools")

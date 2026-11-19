@@ -8,7 +8,8 @@ from ruamel.yaml.comments import CommentedMap
 
 from shared.output_directory import OutputDirectory
 from shared.settings import CommonSettings, PredictSettings, TrainSettings
-from webui.schema import CONNECTING_ARGS, FieldInfo, describe_class, describe_settings, list_types
+from webui.bridge.processes import RUNS_DIR
+from webui.bridge.schema import CONNECTING_ARGS, FieldInfo, describe_class, describe_settings, list_types
 
 PRESET_DIR = Path("configs")
 USER_DIR = Path("configs/user")
@@ -37,6 +38,17 @@ def list_configs() -> list[ConfigEntry]:
 def find_config(name: str) -> ConfigEntry | None:
     """Return the config of a name, None when there is none."""
     return next((entry for entry in list_configs() if entry.name == name), None)
+
+
+def is_trained(entry: ConfigEntry) -> bool:
+    """Return whether a config already has its training in runs/, also when it has just started."""
+    output = OutputDirectory(RUNS_DIR / entry.name)
+    return output.config.exists() or output.pid.exists()
+
+
+def summarize_model(config: dict) -> str:
+    """Return the backbone, neck and head types of a config in one line."""
+    return " · ".join(str(config["model"][block]["type"]) for block in ["backbone", "neck", "head"])
 
 
 def check_name(name: str) -> str | None:
