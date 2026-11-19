@@ -273,6 +273,20 @@ def export_onnx(output_dir: Path, weights: str, image_size: tuple[int, int] | No
     return run_script(arguments + (["--simplify"] if simplify else []))
 
 
+def quantize_onnx(output_dir: Path, onnx_path: Path, mode: str) -> tuple[bool, str]:
+    """Run onnx_tools/quantize.py on an exported file and wait for it.
+
+    Args:
+        output_dir: output directory of the training.
+        onnx_path: onnx file in the export folder.
+        mode: fp16, int8_static or int8_dynamic.
+
+    Returns:
+        Whether it exited without an error, and its output.
+    """
+    return run_script(["onnx_tools/quantize.py", str(output_dir), str(onnx_path), "--mode", mode])
+
+
 def run_onnx_tool(tool: str, output_dir: Path, onnx_path: Path, image_path: Path) -> tuple[bool, str, Path]:
     """Run onnx_tools/verify.py or onnx_tools/inference.py on an image and wait for it.
 
