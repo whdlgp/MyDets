@@ -130,7 +130,7 @@ def add_export(output: OutputDirectory) -> None:
             upload.reset()
             return
 
-        image_path = upload_dir / event.file.name
+        image_path = upload_dir / Path(event.file.name.replace("\\", "/")).name
         await event.file.save(image_path)
         result.clear()
 

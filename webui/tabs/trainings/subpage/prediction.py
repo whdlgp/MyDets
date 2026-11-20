@@ -104,7 +104,7 @@ def add_predict(output: OutputDirectory, devices: list[tuple[str, str]]) -> None
             single_images = ui.row().classes("flex-1 gap-4")
 
             async def predict_upload(event: object) -> None:
-                input_path = upload_dir / event.file.name
+                input_path = upload_dir / Path(event.file.name.replace("\\", "/")).name
                 await event.file.save(input_path)
                 single_images.clear()
 

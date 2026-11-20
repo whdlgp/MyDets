@@ -7,11 +7,14 @@ A browser interface for training, monitoring and checking the models of this pro
 ```
 webui/
 ├─ app.py                      Entry point: starts the server and imports the pages
+├─ app_secure.py               Secure entry point: starts the server with token authentication
 ├─ bridge/                     Connects the web UI to the rest of the project (configs/, data/, runs/ and the scripts)
 │  ├─ configs.py               Training config files: list, check, save, summarize
 │  ├─ datasets.py              Datasets in data/: read, draw samples, download
 │  ├─ processes.py             Runs the scripts as processes and reads the results they leave in runs/
 │  └─ schema.py                Describes the model and settings classes for the config form
+├─ security/                   Token-based authentication
+│  └─ login.py                 Login page and authentication middleware
 └─ tabs/                       Everything the user sees
    ├─ common/                  Shared by every tab
    │  ├─ layout.py             Side menu, theme, language, page title
@@ -52,6 +55,7 @@ webui/
   - The other files in `subpage/` are used by that subpage only.
 - Layers, from top to bottom: pages, parts of a subpage, `<tab>/common.py`, `tabs/common/`, `bridge/`, `shared/`. A file imports only from the layers below it, and never from another tab. Files inside `bridge/` may import each other, and so may files inside `tabs/common/`.
 - `app.py` registers a page by importing its module: importing runs the `@ui.page` decorator, which registers the route.
+- `app_secure.py` uses the same web UI as `app.py`, with token-based authentication.
 
 ## Adding code
 
@@ -62,6 +66,18 @@ webui/
 | Used by both the page and the subpage of a tab | `tabs/<tab>/common.py` |
 | Used by several tabs | `tabs/common/` |
 | Reading or writing project files, running scripts, reading project classes | `bridge/` |
+| Authentication | `security/login.py` |
+
+## Running the Web UI
+
+* `app.py`
+  * Local use
+  * No authentication
+
+* `app_secure.py`
+  * Remote access or external hosting
+  * Token-based authentication
+  * Must be accessed through an HTTPS proxy provided by the hosting platform
 
 ## Notes
 
