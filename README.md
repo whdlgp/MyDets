@@ -79,11 +79,24 @@ Both read the configs in `configs/` and the datasets in `data/`, and write to `r
 
 ### Web UI
 
+#### Local use
+
 ```
 uv run webui\app.py
 ```
 
-Opens http://localhost:8080 in the browser.
+Opens [http://localhost:8080](http://localhost:8080) in the browser. No authentication required.
+
+#### Remote access
+
+```
+uv run webui\app_secure.py
+```
+
+- Token-based authentication
+- Requires an HTTPS proxy provided by the hosting platform
+
+#### Features
 
 <img src="assets/webui/showcase.png" alt="MyDets web UI" width="720">
 
